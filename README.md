@@ -28,6 +28,8 @@ tracklens -file testdata/sample.json -by day -tz Europe/Tallinn   # daily totals
 tracklens -file testdata/sample.json -format json                 # or csv
 tracklens -days 7 -compare                   # this week vs the week before, biggest movers first
 tracklens -overlap-tolerance 2m              # ignore overlaps of up to 2 minutes
+tracklens -days 7 -compare -format csv       # every view supports table, json and csv
+tracklens -days 14 -by day -format json -v   # -v logs progress to stderr
 tracklens -days 14 -strict                   # exit 2 if any check fires (for CI/cron)
 ```
 
@@ -42,6 +44,14 @@ tracklens -days 90 -history    # report from stored data
 ```
 
 Schema migrations are embedded in the binary and applied on connect, under an advisory lock so concurrent runs are safe. Entries are upserted by Toggl id, so a timer that was running at the last sync is corrected once it stops.
+
+### Scheduled sync
+
+ runs a daily  of the last 14 days. It is off until you set the repository variable  and add the secrets  and ; it can also be run by hand from the Actions tab.
+
+### Releases
+
+Pushing a tag such as  runs : it tests, builds binaries for Linux, macOS and Windows (amd64 and arm64 where applicable) with a  file, creates a GitHub release, and pushes an image to .
 
 ### Docker
 

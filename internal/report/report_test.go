@@ -173,3 +173,39 @@ func TestCompare(t *testing.T) {
 		}
 	}
 }
+
+func TestCompareJSONAndCSVNewProject(t *testing.T) {
+	rows := []CompareRow{{Project: "Old", Current: time.Hour, Previous: 2 * time.Hour}, {Project: "Fresh", Current: time.Hour}}
+	var j, c strings.Builder
+	if err := WriteCompareJSON(&j, rows); err != nil {
+		t.Fatal(err)
+	}
+	// A project with no previous time has no meaningful percentage.
+	if !strings.Contains(j.String(), `"change_percent": -50`) || !strings.Contains(j.String(), `"change_percent": null`) {
+		t.Fatalf("json:\n%s", j.String())
+	}
+	if err := WriteCompareCSV(&c, rows); err != nil {
+		t.Fatal(err)
+	}
+	if want := "project,current_hours,previous_hours,change_hours,change_percent\nOld,1.00,2.00,-1.00,-50.0\nFresh,1.00,0.00,1.00,\n"; c.String() != want {
+		t.Fatalf("csv = %q", c.String())
+	}
+}
+
+func TestDaysJSONAndCSV(t *testing.T) {
+	rows := []DayRow{{Day: "2026-10-15", Total: 90 * time.Minute, Billable: time.Hour}}
+	var j, c strings.Builder
+	if err := WriteDaysJSON(&j, rows); err != nil || !strings.Contains(j.String(), `"hours": 1.5`) {
+		t.Fatalf("json: %v\n%s", err, j.String())
+	}
+	if err := WriteDaysCSV(&c, rows); err != nil || c.String() != "day,hours,billable_hours\n2026-10-15,1.50,1.00\n" {
+		t.Fatalf("csv: %v %q", err, c.String())
+	}
+}
+
+func TestOutputRoundsToTwoDecimals(t *testing.T) {
+	var j strings.Builder
+	if err := WriteDaysJSON(&j, []DayRow{{Day: "d", Total: 20 * time.Minute}}); err != nil || !strings.Contains(j.String(), `"hours": 0.33`) {
+		t.Fatalf("%v\n%s", err, j.String())
+	}
+}

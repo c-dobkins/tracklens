@@ -58,6 +58,14 @@ jobs:
             echo "::error title=govulncheck::$(echo "$found" | sed ':a;N;$!ba;s/\n/%0A/g')"
             exit 1
           fi
+  workflows:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: go run github.com/rhysd/actionlint/cmd/actionlint@vv1.7.12
   docker:
     runs-on: ubuntu-latest
     steps:

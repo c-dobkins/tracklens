@@ -8,6 +8,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"os/signal"
 	"syscall"
@@ -37,6 +38,7 @@ type config struct {
 	strict  bool
 	compare bool
 	overlap time.Duration
+	log     *slog.Logger // nil means silent
 }
 
 type fixture struct {
@@ -59,6 +61,7 @@ func main() {
 	flag.BoolVar(&c.strict, "strict", false, "exit with status 2 if any data-quality finding is reported")
 	flag.BoolVar(&c.compare, "compare", false, "compare the last -days against the -days before that, by project")
 	flag.DurationVar(&c.overlap, "overlap-tolerance", 0, "ignore overlapping entries by up to this long (e.g. 2m)")
+	verbose := flag.Bool("v", false, "log progress to stderr")
 	flag.Parse()
 
 	if *showVersion {
@@ -71,6 +74,9 @@ func main() {
 		os.Exit(1)
 	}
 	c.tz = loc
+	if *verbose {
+		c.log = slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -100,8 +106,8 @@ func (c config) validate() error {
 	if c.days < 1 {
 		return errors.New("-days must be at least 1")
 	}
-	if c.compare && (c.by != "project" || c.format != "table") {
-		return errors.New("-compare supports only -by project with -format table")
+	if c.compare && c.by != "project" {
+		return errors.New("-compare reports by project; drop -by day")
 	}
 	if (c.sync || c.history) && c.dsn == "" {
 		return errors.New("-sync and -history need -db or $TRACKLENS_DATABASE_URL")
@@ -125,25 +131,50 @@ func run(ctx context.Context, c config, out io.Writer) error {
 		return err
 	}
 
-	if c.compare {
-		return report.WriteCompare(out, report.Compare(entries, names, now, now.AddDate(0, 0, -c.days)))
+	c.logger().Debug("loaded", "entries", len(entries), "projects", len(names))
+
+	switch {
+	case c.compare:
+		rows := report.Compare(entries, names, now, now.AddDate(0, 0, -c.days))
+		return pick(c.format,
+			func() error { return report.WriteCompare(out, rows) },
+			func() error { return report.WriteCompareJSON(out, rows) },
+			func() error { return report.WriteCompareCSV(out, rows) })
+	case c.by == "day":
+		rows := report.ByDay(entries, now, c.tz)
+		return pick(c.format,
+			func() error { return report.WriteDays(out, rows) },
+			func() error { return report.WriteDaysJSON(out, rows) },
+			func() error { return report.WriteDaysCSV(out, rows) })
 	}
-	if c.by == "day" {
-		return report.WriteDays(out, report.ByDay(entries, now, c.tz))
-	}
+
 	s := report.Summarize(entries, names, now, report.Options{OverlapTolerance: c.overlap})
-	switch c.format {
-	case "json":
-		err = s.WriteJSON(out)
-	case "csv":
-		err = s.WriteCSV(out)
-	default:
-		err = s.Write(out)
+	if err := pick(c.format, func() error { return s.Write(out) }, func() error { return s.WriteJSON(out) }, func() error { return s.WriteCSV(out) }); err != nil {
+		return err
 	}
-	if err == nil && c.strict && len(s.Findings) > 0 {
+	if c.strict && len(s.Findings) > 0 {
+		c.logger().Debug("strict mode: findings present", "count", len(s.Findings))
 		return errFindings
 	}
-	return err
+	return nil
+}
+
+// pick runs the writer for the chosen output format.
+func pick(format string, table, jsonOut, csvOut func() error) error {
+	switch format {
+	case "json":
+		return jsonOut()
+	case "csv":
+		return csvOut()
+	}
+	return table()
+}
+
+func (c config) logger() *slog.Logger {
+	if c.log == nil {
+		return slog.New(slog.DiscardHandler)
+	}
+	return c.log
 }
 
 // load picks the data source: fixture file, stored history, or the live API.
@@ -155,7 +186,11 @@ func load(ctx context.Context, c config, now time.Time) ([]toggl.Entry, map[int6
 	}
 	from, to := now.AddDate(0, 0, -back), now.AddDate(0, 0, 1)
 
+	log := c.logger()
+	log.Debug("window", "from", from, "to", to)
+
 	if c.file != "" {
+		log.Debug("source", "kind", "file", "path", c.file)
 		b, err := os.ReadFile(c.file)
 		if err != nil {
 			return nil, nil, now, err
@@ -181,6 +216,7 @@ func load(ctx context.Context, c config, now time.Time) ([]toggl.Entry, map[int6
 	}
 
 	if c.history {
+		log.Debug("source", "kind", "history")
 		st, err := store.Open(ctx, c.dsn)
 		if err != nil {
 			return nil, nil, now, err
@@ -198,6 +234,7 @@ func load(ctx context.Context, c config, now time.Time) ([]toggl.Entry, map[int6
 	if token == "" {
 		return nil, nil, now, errors.New("set TOGGL_API_TOKEN (Toggl profile page), or use -file or -history")
 	}
+	log.Debug("source", "kind", "api")
 	api := toggl.New(token)
 	if u := os.Getenv("TOGGL_API_URL"); u != "" { // for tests and proxies
 		api.BaseURL = u
@@ -211,6 +248,7 @@ func load(ctx context.Context, c config, now time.Time) ([]toggl.Entry, map[int6
 		return nil, nil, now, err
 	}
 	if c.sync {
+		log.Info("syncing", "entries", len(entries), "projects", len(names))
 		st, err := store.Open(ctx, c.dsn)
 		if err != nil {
 			return nil, nil, now, err

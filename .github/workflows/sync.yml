@@ -1,0 +1,24 @@
+# Daily sync of recent Toggl entries into PostgreSQL.
+# Off by default: set the repository variable ENABLE_SYNC=true and add the
+# secrets TOGGL_API_TOKEN and TRACKLENS_DATABASE_URL to turn it on.
+name: sync
+on:
+  schedule:
+    - cron: "17 5 * * *"
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  sync:
+    if: ${{ vars.ENABLE_SYNC == 'true' || github.event_name == 'workflow_dispatch' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: sync last 14 days
+        env:
+          TOGGL_API_TOKEN: ${{ secrets.TOGGL_API_TOKEN }}
+          TRACKLENS_DATABASE_URL: ${{ secrets.TRACKLENS_DATABASE_URL }}
+        run: go run ./cmd/tracklens -days 14 -sync -v -format json > /dev/null

@@ -2,7 +2,10 @@ package main
 
 import (
 	"context"
+	"encoding/csv"
+	"encoding/json"
 	"errors"
+	"log/slog"
 	"strings"
 	"testing"
 	"time"
@@ -69,9 +72,8 @@ func TestMissingTokenIsExplained(t *testing.T) {
 
 func TestValidateRejectsBadCombos(t *testing.T) {
 	for name, mod := range map[string]func(*config){
-		"zero days":         func(c *config) { c.days = 0 },
-		"compare with day":  func(c *config) { c.compare, c.by = true, "day" },
-		"compare with json": func(c *config) { c.compare, c.format = true, "json" },
+		"zero days":        func(c *config) { c.days = 0 },
+		"compare with day": func(c *config) { c.compare, c.by = true, "day" },
 	} {
 		c := base()
 		mod(&c)
@@ -115,5 +117,55 @@ func TestOverlapToleranceFlag(t *testing.T) {
 	}
 	if strings.Contains(out.String(), "overlap") {
 		t.Fatalf("15m overlap should be tolerated:\n%s", out.String())
+	}
+}
+
+func TestAllViewsInAllFormats(t *testing.T) {
+	views := map[string]func(*config){
+		"project": func(c *config) {},
+		"day":     func(c *config) { c.by = "day" },
+		"compare": func(c *config) { c.compare = true },
+	}
+	for view, setView := range views {
+		for _, format := range []string{"table", "json", "csv"} {
+			t.Run(view+"/"+format, func(t *testing.T) {
+				c := base()
+				setView(&c)
+				c.format = format
+				var out strings.Builder
+				if err := run(context.Background(), c, &out); err != nil {
+					t.Fatal(err)
+				}
+				got := out.String()
+				switch format {
+				case "json":
+					var v any
+					if err := json.Unmarshal([]byte(got), &v); err != nil {
+						t.Fatalf("invalid JSON: %v\n%s", err, got)
+					}
+				case "csv":
+					recs, err := csv.NewReader(strings.NewReader(got)).ReadAll()
+					if err != nil || len(recs) < 2 {
+						t.Fatalf("invalid CSV (%v):\n%s", err, got)
+					}
+				default:
+					if got == "" {
+						t.Fatal("empty table")
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestVerboseLogsToLogger(t *testing.T) {
+	var logs strings.Builder
+	c := base()
+	c.log = slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	if err := run(context.Background(), c, &strings.Builder{}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(logs.String(), "kind=file") || !strings.Contains(logs.String(), "entries=") {
+		t.Fatalf("logs:\n%s", logs.String())
 	}
 }
