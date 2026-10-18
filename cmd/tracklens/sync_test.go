@@ -4,18 +4,16 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/c-dobkins/p1/internal/testdb"
 )
 
 // End to end: fake Toggl API -> -sync into Postgres -> -history without the API.
 func TestSyncThenHistory(t *testing.T) {
-	dsn := os.Getenv("TEST_DATABASE_URL")
-	if dsn == "" {
-		t.Skip("TEST_DATABASE_URL not set")
-	}
+	dsn := testdb.DSN(t)
 	start := time.Now().UTC().Add(-2 * time.Hour).Format(time.RFC3339)
 	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {

@@ -2,32 +2,20 @@ package store
 
 import (
 	"context"
-	"os"
 	"testing"
 	"time"
 
+	"github.com/c-dobkins/p1/internal/testdb"
 	"github.com/c-dobkins/p1/internal/toggl"
 )
 
-// Integration test: runs only when TEST_DATABASE_URL points at a scratch database.
 func openTest(t *testing.T) *Store {
 	t.Helper()
-	dsn := os.Getenv("TEST_DATABASE_URL")
-	if dsn == "" {
-		t.Skip("TEST_DATABASE_URL not set")
-	}
-	ctx := context.Background()
-	s, err := Open(ctx, dsn)
+	s, err := Open(context.Background(), testdb.DSN(t))
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() {
-		s.db.ExecContext(ctx, `TRUNCATE time_entries, projects`)
-		s.Close()
-	})
-	if _, err := s.db.ExecContext(ctx, `TRUNCATE time_entries, projects`); err != nil {
-		t.Fatal(err)
-	}
+	t.Cleanup(func() { _ = s.Close() })
 	return s
 }
 
