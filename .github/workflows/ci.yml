@@ -39,7 +39,7 @@ jobs:
           check-latest: true
       - uses: golangci/golangci-lint-action@v8
         with:
-          version: v2.5.0
+          version: v2.15.0
   vuln:
     runs-on: ubuntu-latest
     steps:
@@ -50,7 +50,7 @@ jobs:
           check-latest: true
       - name: govulncheck
         run: |
-          go run golang.org/x/vuln/cmd/govulncheck@v1.1.4 -format json ./... > vuln.json
+          go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 -format json ./... > vuln.json
           # Findings that carry a call trace are the reachable ones.
           found=$(jq -r 'select(.finding.trace[0].function != null) | "\(.finding.osv) in \(.finding.trace[0].module) \(.finding.trace[0].version) (fixed \(.finding.fixed_version // "n/a"))"' vuln.json | sort -u)
           if [ -n "$found" ]; then
