@@ -63,6 +63,30 @@ A sync is one transaction. It upserts entries by Toggl id, so a timer that was r
 
 `.github/workflows/sync.yml` runs a daily sync (without `-prune`). It stays off until you set the repository variable `ENABLE_SYNC=true` and add the secrets `TOGGL_API_TOKEN` and `TRACKLENS_DATABASE_URL`.
 
+## Dashboard
+
+`-serve` also serves a React + TypeScript dashboard built with [Nivo](https://nivo.rocks) charts:
+
+![tracklens dashboard showing total and billable hours, hours by project, change by project, hours per day and data checks](docs/dashboard-light.png)
+
+```
+make build-ui                                          # npm ci + vite build, then go build -tags webui
+./bin/tracklens -serve :8080 -file testdata/sample.json
+open http://localhost:8080
+```
+
+- **Filters:** one row for period (7/14/30/90 days), project and time zone scopes every tile and chart. Changing them keeps the previous render, dimmed, while new data loads, so the layout never jumps.
+- **Charts:** hours by project and hours per day are stacked billable/non-billable bars. Change by project is a diverging bar of each project's change against the previous period. Every day of the period is shown, including empty ones.
+- **Accessibility:**
+  - Every chart has a legend and a "View as table" twin, so no value depends on hover or on telling colours apart.
+  - Bars are keyboard-focusable and show the same tooltip as on hover.
+  - Findings use a status icon and label, never colour alone.
+- **Colour:** categorical and diverging colours were checked with a palette validator for colour-vision-deficiency separation and contrast, separately for light and dark mode. Dark mode is its own palette, not an inversion.
+- **Bars:** thin (at most 24px) with a rounded value end, a 2px gap between stacked segments, and hit areas larger than the marks.
+- **Build and security:** the built assets are embedded in the Go binary (`-tags webui`), served with a strict Content-Security-Policy, and cached forever under `/assets/` (fingerprinted) while `index.html` always revalidates. A plain `go build` without the tag still works and serves the API only.
+
+For frontend development, run `npm --prefix web run dev` against `tracklens -serve :8080 -file testdata/sample.json`. Vite proxies `/v1` to it.
+
 ## HTTP API
 
 `-serve` exposes the same reports as a small read-only JSON/CSV API, either over the PostgreSQL history or over a fixture:
@@ -106,6 +130,8 @@ curl 'localhost:8080/healthz'
 | `internal/toggl` | API client: auth, retries, window splitting, `Entry` helpers (`Elapsed`, `End`, `Running`) |
 | `internal/report` | Pure functions from entries to `Summary`, `Days` and `Comparison`. Each implements `Renderer` (table, JSON, CSV), so the CLI picks a view and a format independently. |
 | `internal/store` | PostgreSQL persistence with embedded SQL migrations and set-based upserts (`unnest`) |
+| `web` | React 19 + TypeScript dashboard (Vite, Nivo), strict ESLint, Vitest + Testing Library, Playwright end-to-end tests against the real binary |
+| `internal/webui` | Embeds the built dashboard when compiled with `-tags webui` |
 | `internal/server` | Read-only HTTP API over any `Source` (the store, or a fixture) using the Go 1.22+ method-and-path router |
 | `cmd/tracklens` | Flag parsing and wiring. `run(ctx, args, env, stdout, stderr) int` keeps `main` trivial and the CLI testable. |
 
@@ -123,6 +149,7 @@ make lint     # golangci-lint v2 with modernize, revive, gocritic, gosec and mor
 make fuzz     # fuzz the day splitter
 make golden   # rewrite the CLI golden files after an intended output change
 make vuln     # govulncheck
+make web-test # dashboard: lint, typecheck, unit tests, end-to-end tests
 ```
 
 Tests:
@@ -132,7 +159,8 @@ Tests:
 CI on every pull request:
 - Tests against PostgreSQL 16 and 18, with a short fuzz run.
 - golangci-lint, govulncheck, CodeQL (once the repository is public; private repositories need GitHub Advanced Security) and actionlint.
-- A Docker build with a smoke test.
+- The dashboard: npm audit of runtime dependencies, ESLint (strict, type-aware), TypeScript, Vitest, a production build, and Playwright end-to-end tests that start the real Go binary with the dashboard embedded.
+- A Docker build with a smoke test of the CLI, the API and the embedded dashboard.
 
 All actions are pinned by commit SHA and kept current by Dependabot. Tagging `vX.Y.Z` builds binaries for Linux, macOS and Windows with checksums and signed build provenance, and pushes a multi-tag image with SBOM and provenance to GHCR.
 

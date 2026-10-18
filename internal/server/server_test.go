@@ -6,11 +6,13 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"io/fs"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"testing/fstest"
 	"time"
 
 	"github.com/c-dobkins/p1/internal/report"
@@ -48,7 +50,7 @@ func sample() []toggl.Entry {
 
 func get(t *testing.T, src Source, target string) *httptest.ResponseRecorder {
 	t.Helper()
-	h := New(src, slog.New(slog.DiscardHandler), func() time.Time { return now })
+	h := New(src, slog.New(slog.DiscardHandler), func() time.Time { return now }, nil)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequestWithContext(t.Context(), http.MethodGet, target, http.NoBody))
 	return rec
@@ -113,6 +115,12 @@ func TestWindowAndFilters(t *testing.T) {
 	if !strings.Contains(rec.Body.String(), "2026-10-17") { // 17:00 UTC on the 16th is the 17th in Tokyo
 		t.Fatalf("tz not applied: %s", rec.Body.String())
 	}
+
+	// Every day of the period is present, including days without time.
+	rec = get(t, src, "/v1/days?days=7&format=csv")
+	if lines := strings.Count(rec.Body.String(), "\n"); lines != 1+8 { // header + 10-09 through 10-16
+		t.Fatalf("want 8 days, got:\n%s", rec.Body.String())
+	}
 }
 
 func TestBadParameters(t *testing.T) {
@@ -151,7 +159,7 @@ func TestHealthAndRouting(t *testing.T) {
 		t.Fatalf("unknown path: %d", rec.Code)
 	}
 
-	h := New(&fakeSource{}, slog.New(slog.DiscardHandler), func() time.Time { return now })
+	h := New(&fakeSource{}, slog.New(slog.DiscardHandler), func() time.Time { return now }, nil)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/v1/summary", strings.NewReader("{}")))
 	if rec.Code != http.StatusMethodNotAllowed {
@@ -161,7 +169,7 @@ func TestHealthAndRouting(t *testing.T) {
 
 func TestRequestsAreLogged(t *testing.T) {
 	var logs strings.Builder
-	h := New(&fakeSource{}, slog.New(slog.NewTextHandler(&logs, nil)), func() time.Time { return now })
+	h := New(&fakeSource{}, slog.New(slog.NewTextHandler(&logs, nil)), func() time.Time { return now }, nil)
 	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/v1/summary?days=x", http.NoBody))
 	if !strings.Contains(logs.String(), "path=/v1/summary") || !strings.Contains(logs.String(), "status=400") {
 		t.Fatalf("logs: %s", logs.String())
@@ -170,7 +178,7 @@ func TestRequestsAreLogged(t *testing.T) {
 
 func TestClientGoneDuringWriteIsLogged(t *testing.T) {
 	var logs strings.Builder
-	h := New(&fakeSource{entries: sample()}, slog.New(slog.NewTextHandler(&logs, nil)), func() time.Time { return now })
+	h := New(&fakeSource{entries: sample()}, slog.New(slog.NewTextHandler(&logs, nil)), func() time.Time { return now }, nil)
 	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/v1/summary", http.NoBody)
 	h.ServeHTTP(brokenWriter{httptest.NewRecorder()}, req)
 	if !strings.Contains(logs.String(), "write response") {
@@ -193,10 +201,55 @@ func (slowSource) Entries(ctx context.Context, _, _ time.Time) ([]toggl.Entry, e
 func TestRequestContextEndsTheQuery(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 50*time.Millisecond)
 	defer cancel()
-	h := New(&slowSource{}, slog.New(slog.DiscardHandler), func() time.Time { return now })
+	h := New(&slowSource{}, slog.New(slog.DiscardHandler), func() time.Time { return now }, nil)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequestWithContext(ctx, http.MethodGet, "/v1/summary", http.NoBody))
 	if rec.Code != http.StatusServiceUnavailable {
 		t.Fatalf("status %d", rec.Code)
+	}
+}
+
+func serveUI(t *testing.T, ui fs.FS, target string) *httptest.ResponseRecorder {
+	t.Helper()
+	h := New(&fakeSource{}, slog.New(slog.DiscardHandler), func() time.Time { return now }, ui)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequestWithContext(t.Context(), http.MethodGet, target, http.NoBody))
+	return rec
+}
+
+func TestDashboardIsServedWithCachingAndSecurityHeaders(t *testing.T) {
+	ui := fstest.MapFS{
+		"index.html":         {Data: []byte("<!doctype html><title>tracklens</title>")},
+		"assets/app-1a2b.js": {Data: []byte("console.log(1)")},
+	}
+	index := serveUI(t, ui, "/")
+	if index.Code != http.StatusOK || !strings.Contains(index.Body.String(), "<title>tracklens") || index.Header().Get("Cache-Control") != "no-cache" {
+		t.Fatalf("index: %d %q %s", index.Code, index.Header().Get("Cache-Control"), index.Body.String())
+	}
+	asset := serveUI(t, ui, "/assets/app-1a2b.js")
+	if asset.Code != http.StatusOK || !strings.Contains(asset.Header().Get("Cache-Control"), "immutable") {
+		t.Fatalf("asset: %d %q", asset.Code, asset.Header().Get("Cache-Control"))
+	}
+	for _, rec := range []*httptest.ResponseRecorder{index, asset, serveUI(t, ui, "/v1/summary")} {
+		if !strings.Contains(rec.Header().Get("Content-Security-Policy"), "default-src 'self'") || rec.Header().Get("X-Content-Type-Options") != "nosniff" {
+			t.Fatalf("missing security headers: %v", rec.Header())
+		}
+	}
+	// The API still wins over the file server for its own paths.
+	if api := serveUI(t, ui, "/v1/summary"); !strings.HasPrefix(api.Header().Get("Content-Type"), "application/json") {
+		t.Fatalf("api shadowed by static files: %q", api.Header().Get("Content-Type"))
+	}
+	if missing := serveUI(t, ui, "/nope.js"); missing.Code != http.StatusNotFound {
+		t.Fatalf("missing file: %d", missing.Code)
+	}
+}
+
+func TestWithoutDashboardRootExplainsTheAPI(t *testing.T) {
+	rec := serveUI(t, nil, "/")
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "-tags webui") {
+		t.Fatalf("%d %s", rec.Code, rec.Body.String())
+	}
+	if rec := serveUI(t, nil, "/other"); rec.Code != http.StatusNotFound {
+		t.Fatalf("other path: %d", rec.Code)
 	}
 }

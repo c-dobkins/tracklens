@@ -44,6 +44,32 @@ func ByDay(entries []toggl.Entry, now time.Time, loc *time.Location) Days {
 	return out
 }
 
+// Fill returns a row for every calendar day in loc from the day containing
+// from through the day containing to, with zero rows for days without time,
+// so a chart of the period does not skip empty days.
+func (ds Days) Fill(from, to time.Time, loc *time.Location) Days {
+	const layout = "2006-01-02"
+	have := make(map[string]DayRow, len(ds))
+	for _, r := range ds {
+		have[r.Day] = r
+	}
+	last := to.In(loc).Format(layout)
+	var out Days
+	y, m, d := from.In(loc).Date()
+	for day := time.Date(y, m, d, 12, 0, 0, 0, loc); ; day = day.AddDate(0, 0, 1) { // noon: clear of DST jumps
+		key := day.Format(layout)
+		if key > last {
+			break
+		}
+		r, ok := have[key]
+		if !ok {
+			r = DayRow{Day: key}
+		}
+		out = append(out, r)
+	}
+	return out
+}
+
 type segment struct {
 	day string
 	d   time.Duration

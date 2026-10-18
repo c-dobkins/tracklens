@@ -3,3 +3,7 @@
 bin
 coverage.out
 .env
+web/node_modules
+web/test-results
+web/playwright-report
+internal/webui/dist

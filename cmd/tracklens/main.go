@@ -25,6 +25,7 @@ import (
 	"github.com/c-dobkins/p1/internal/server"
 	"github.com/c-dobkins/p1/internal/store"
 	"github.com/c-dobkins/p1/internal/toggl"
+	"github.com/c-dobkins/p1/internal/webui"
 )
 
 // version is set at build time: -ldflags "-X main.version=v1.2.3".
@@ -408,7 +409,7 @@ func runServer(ctx context.Context, c config, log *slog.Logger) error {
 	}
 
 	srv := &http.Server{
-		Handler:           server.New(src, log, now),
+		Handler:           server.New(src, log, now, webui.FS()),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       10 * time.Second,
 		WriteTimeout:      server.RequestTimeout + 10*time.Second,

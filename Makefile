@@ -1,9 +1,19 @@
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 
-.PHONY: build test cover fuzz golden lint vuln tidy docker
+.PHONY: build build-ui web web-test test cover fuzz golden lint vuln tidy docker
 
 build:
 	go build -trimpath -ldflags "-X main.version=$(VERSION)" -o bin/tracklens ./cmd/tracklens
+
+# The binary with the dashboard embedded.
+build-ui: web
+	go build -trimpath -tags webui -ldflags "-X main.version=$(VERSION)" -o bin/tracklens ./cmd/tracklens
+
+web:
+	npm --prefix web ci --no-audit --no-fund && npm --prefix web run build
+
+web-test:
+	npm --prefix web run lint && npm --prefix web run typecheck && npm --prefix web test && npm --prefix web run e2e
 
 # Set TEST_DATABASE_URL to include the PostgreSQL integration tests.
 test:

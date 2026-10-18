@@ -10,6 +10,14 @@ updates:
     schedule: {interval: weekly}
     groups:
       actions: {patterns: ["*"]}
+  - package-ecosystem: npm
+    directory: /web
+    schedule: {interval: weekly}
+    groups:
+      npm-dev:
+        dependency-type: development
+      npm-runtime:
+        dependency-type: production
   - package-ecosystem: docker
     directory: /
     schedule: {interval: weekly}

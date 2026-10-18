@@ -22,8 +22,15 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: web/.nvmrc
+          cache: npm
+          cache-dependency-path: web/package-lock.json
       - name: test
         run: go test -race ./...
+      - name: build the dashboard
+        run: npm --prefix web ci --no-audit --no-fund && npm --prefix web run build
       - name: build
         run: |
           mkdir dist
@@ -31,7 +38,7 @@ jobs:
             os=${target%/*}; arch=${target#*/}
             ext=""; [ "$os" = windows ] && ext=".exe"
             name="tracklens_${GITHUB_REF_NAME}_${os}_${arch}"
-            CGO_ENABLED=0 GOOS=$os GOARCH=$arch go build -trimpath \
+            CGO_ENABLED=0 GOOS=$os GOARCH=$arch go build -trimpath -tags webui \
               -ldflags "-s -w -X main.version=${GITHUB_REF_NAME}" \
               -o "dist/tracklens${ext}" ./cmd/tracklens
             if [ "$os" = windows ]; then

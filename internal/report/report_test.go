@@ -398,3 +398,22 @@ func TestWindow(t *testing.T) {
 		t.Fatalf("periods %v %v", pFrom, cutoff)
 	}
 }
+
+func TestDaysFill(t *testing.T) {
+	have := Days{{Day: "2026-10-14", Total: time.Hour}}
+	got := have.Fill(time.Date(2026, 10, 12, 18, 0, 0, 0, time.UTC), time.Date(2026, 10, 15, 9, 0, 0, 0, time.UTC), time.UTC)
+	want := Days{{Day: "2026-10-12"}, {Day: "2026-10-13"}, {Day: "2026-10-14", Total: time.Hour}, {Day: "2026-10-15"}}
+	if !slices.Equal(got, want) {
+		t.Fatalf("got %+v", got)
+	}
+
+	// Across a DST change the calendar still advances one day at a time.
+	ny, err := time.LoadLocation("America/New_York")
+	if err != nil {
+		t.Skip("tzdata unavailable")
+	}
+	got = Days{}.Fill(time.Date(2026, 10, 31, 23, 0, 0, 0, ny), time.Date(2026, 11, 2, 1, 0, 0, 0, ny), ny)
+	if len(got) != 3 || got[1].Day != "2026-11-01" {
+		t.Fatalf("DST: %+v", got)
+	}
+}

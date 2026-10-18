@@ -14,10 +14,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"io/fs"
 	"log/slog"
 	"net/http"
 	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -49,14 +52,52 @@ type Server struct {
 }
 
 // New returns the API handler. now is the report clock, usually time.Now.
-func New(src Source, log *slog.Logger, now func() time.Time) http.Handler {
+// ui, when not nil, is the built dashboard, served at /.
+func New(src Source, log *slog.Logger, now func() time.Time, ui fs.FS) http.Handler {
 	s := &Server{src: src, log: log, now: now}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v1/summary", s.summary)
 	mux.HandleFunc("GET /v1/days", s.days)
 	mux.HandleFunc("GET /v1/compare", s.compare)
 	mux.HandleFunc("GET /healthz", s.health)
-	return s.logRequests(mux)
+	if ui != nil {
+		mux.Handle("GET /", static(http.FileServerFS(ui)))
+	} else {
+		mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+			_, _ = io.WriteString(w, "tracklens API: see /v1/summary, /v1/days, /v1/compare and /healthz.\n"+
+				"This build has no dashboard; build it with `npm --prefix web run build` and `go build -tags webui`.\n")
+		})
+	}
+	return s.logRequests(securityHeaders(mux))
+}
+
+// contentSecurityPolicy allows only same-origin scripts and requests. Inline
+// styles are allowed because the chart library positions tooltips with them.
+const contentSecurityPolicy = "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; " +
+	"object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'"
+
+func securityHeaders(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		h := w.Header()
+		h.Set("Content-Security-Policy", contentSecurityPolicy)
+		h.Set("X-Content-Type-Options", "nosniff")
+		h.Set("Referrer-Policy", "no-referrer")
+		next.ServeHTTP(w, r)
+	})
+}
+
+// static serves the dashboard. Vite fingerprints everything under /assets/,
+// so those files can be cached forever; index.html must always revalidate.
+func static(files http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/assets/") {
+			w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+		} else {
+			w.Header().Set("Cache-Control", "no-cache")
+		}
+		files.ServeHTTP(w, r)
+	})
 }
 
 // params are the query parameters shared by the report endpoints.
@@ -151,7 +192,8 @@ func (s *Server) summary(w http.ResponseWriter, r *http.Request) {
 func (s *Server) days(w http.ResponseWriter, r *http.Request) {
 	s.serve(w, r, endpoint{params: []string{"tz"},
 		build: func(p params, es []toggl.Entry, _ map[int64]string, now time.Time) report.Renderer {
-			return report.ByDay(es, now, p.tz)
+			// Charts need every day of the period, including empty ones.
+			return report.ByDay(es, now, p.tz).Fill(now.AddDate(0, 0, -p.days), now, p.tz)
 		}})
 }
 

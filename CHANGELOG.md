@@ -13,6 +13,9 @@ Nothing has been tagged yet. These are the changes since the first version on `m
 - `store.Sync` replaces `SaveEntries`/`SaveProjects`.
 
 ### Added
+- A React + TypeScript dashboard with Nivo charts, served by `-serve` when built with `-tags webui`. It has filters, stat tiles, three charts with table views, data checks, dark mode and a phone layout, and is covered by Vitest and Playwright tests.
+- `/v1/days` returns every day of the period, with zero rows for days without time.
+- Security headers (CSP, nosniff, no-referrer) on every HTTP response.
 - `-serve` provides a read-only HTTP API (it rejects unknown parameters and report flags, never migrates, and has per-request deadlines) (`/v1/summary`, `/v1/days`, `/v1/compare`, `/healthz`) over the PostgreSQL history or a fixture, in JSON or CSV, with graceful shutdown.
 - `-prune`, used with `-sync`, deletes stored entries in the window that Toggl no longer returns.
 - `-project` filters by project name, case-insensitively.
