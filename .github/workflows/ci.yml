@@ -50,10 +50,12 @@ jobs:
           check-latest: true
       - name: govulncheck
         run: |
-          if ! go run golang.org/x/vuln/cmd/govulncheck@v1.1.4 ./... > vuln.txt 2>&1; then
-            cat vuln.txt
-            # Surface the report as an annotation so it is visible without opening logs.
-            echo "::error title=govulncheck::$(head -c 3000 vuln.txt | sed ':a;N;$!ba;s/\n/%0A/g')"
+          go run golang.org/x/vuln/cmd/govulncheck@v1.1.4 -format json ./... > vuln.json
+          # Findings that carry a call trace are the reachable ones.
+          found=$(jq -r 'select(.finding.trace[0].function != null) | "\(.finding.osv) in \(.finding.trace[0].module) \(.finding.trace[0].version) (fixed \(.finding.fixed_version // "n/a"))"' vuln.json | sort -u)
+          if [ -n "$found" ]; then
+            echo "$found"
+            echo "::error title=govulncheck::$(echo "$found" | sed ':a;N;$!ba;s/\n/%0A/g')"
             exit 1
           fi
   docker:
