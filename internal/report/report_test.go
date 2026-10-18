@@ -20,7 +20,7 @@ func TestSummarize(t *testing.T) {
 		{ID: 2, ProjectID: ptr(int64(1)), Billable: false, Start: c, Stop: &d, Duration: 2700},
 		{ID: 3, Start: ts(11, 0), Duration: -1},
 	}
-	s := Summarize(entries, map[int64]string{1: "Portal"}, ts(11, 30))
+	s := Summarize(entries, map[int64]string{1: "Portal"}, ts(11, 30), Options{})
 
 	// 1h + 45m + 30m running
 	if s.Total != 2*time.Hour+15*time.Minute {
@@ -52,7 +52,7 @@ func TestByDay(t *testing.T) {
 }
 
 func TestWriteJSONAndCSV(t *testing.T) {
-	s := Summarize([]toggl.Entry{{ID: 1, ProjectID: ptr(int64(1)), Billable: true, Start: ts(9, 0), Duration: 3600}}, map[int64]string{1: "Portal"}, ts(12, 0))
+	s := Summarize([]toggl.Entry{{ID: 1, ProjectID: ptr(int64(1)), Billable: true, Start: ts(9, 0), Duration: 3600}}, map[int64]string{1: "Portal"}, ts(12, 0), Options{})
 	var j, c strings.Builder
 	if err := s.WriteJSON(&j); err != nil || !strings.Contains(j.String(), `"project": "Portal"`) || !strings.Contains(j.String(), `"findings": []`) {
 		t.Fatalf("json: %v\n%s", err, j.String())
@@ -82,7 +82,7 @@ type failWriter struct{}
 func (failWriter) Write([]byte) (int, error) { return 0, io.ErrClosedPipe }
 
 func TestWritersReportErrors(t *testing.T) {
-	s := Summarize([]toggl.Entry{{ID: 1, Start: ts(9, 0), Duration: 60}}, nil, ts(10, 0))
+	s := Summarize([]toggl.Entry{{ID: 1, Start: ts(9, 0), Duration: 60}}, nil, ts(10, 0), Options{})
 	if err := s.Write(failWriter{}); err == nil {
 		t.Error("Write: want error")
 	}
@@ -91,5 +91,85 @@ func TestWritersReportErrors(t *testing.T) {
 	}
 	if err := WriteDays(failWriter{}, ByDay(nil, ts(9, 0), time.UTC)); err == nil {
 		t.Error("WriteDays: want error")
+	}
+}
+
+func TestByDaySplitsAtMidnight(t *testing.T) {
+	start := time.Date(2026, 10, 14, 22, 0, 0, 0, time.UTC)
+	rows := ByDay([]toggl.Entry{{Start: start, Duration: 4 * 3600, Billable: true}}, start, time.UTC)
+	if len(rows) != 2 || rows[0].Total != 2*time.Hour || rows[1].Total != 2*time.Hour || rows[1].Billable != 2*time.Hour {
+		t.Fatalf("rows = %+v", rows)
+	}
+}
+
+func TestByDayRunningTimerSplitsToo(t *testing.T) {
+	start := time.Date(2026, 10, 14, 23, 0, 0, 0, time.UTC)
+	now := start.Add(26 * time.Hour) // spans three days
+	rows := ByDay([]toggl.Entry{{Start: start, Duration: -1}}, now, time.UTC)
+	if len(rows) != 3 || rows[0].Total != time.Hour || rows[1].Total != 24*time.Hour || rows[2].Total != time.Hour {
+		t.Fatalf("rows = %+v", rows)
+	}
+}
+
+func TestByDayDST(t *testing.T) {
+	ny, err := time.LoadLocation("America/New_York")
+	if err != nil {
+		t.Skip("tzdata unavailable")
+	}
+	// US clocks went back on 2026-11-01, so that local day has 25 hours.
+	start := time.Date(2026, 11, 1, 0, 0, 0, 0, ny)
+	rows := ByDay([]toggl.Entry{{Start: start, Duration: 30 * 3600}}, start, ny)
+	if len(rows) != 2 || rows[0].Day != "2026-11-01" || rows[0].Total != 25*time.Hour || rows[1].Total != 5*time.Hour {
+		t.Fatalf("rows = %+v", rows)
+	}
+}
+
+func TestOverlapTolerance(t *testing.T) {
+	a := toggl.Entry{ID: 1, Start: ts(9, 0), Stop: ptr(ts(10, 0)), Duration: 3600}
+	b := toggl.Entry{ID: 2, Start: ts(9, 59), Stop: ptr(ts(11, 0)), Duration: 3660} // 1 minute early
+	if got := overlaps([]toggl.Entry{a, b}, 0); len(got) != 1 {
+		t.Fatalf("no tolerance: %v", got)
+	}
+	if got := overlaps([]toggl.Entry{a, b}, 2*time.Minute); len(got) != 0 {
+		t.Fatalf("within tolerance: %v", got)
+	}
+}
+
+func TestOverlapLongEntrySwallowsShortOnes(t *testing.T) {
+	long := toggl.Entry{ID: 1, Start: ts(9, 0), Stop: ptr(ts(17, 0)), Duration: 8 * 3600}
+	s1 := toggl.Entry{ID: 2, Start: ts(10, 0), Stop: ptr(ts(10, 30)), Duration: 1800}
+	s2 := toggl.Entry{ID: 3, Start: ts(12, 0), Stop: ptr(ts(12, 30)), Duration: 1800}
+	got := overlaps([]toggl.Entry{s2, long, s1}, 0)
+	// Comparing only neighbours would miss the second one (entry 3 vs entry 2).
+	if len(got) != 2 || !strings.Contains(got[1], "entries 1 and 3") {
+		t.Fatalf("got %v", got)
+	}
+}
+
+func TestCompare(t *testing.T) {
+	now := time.Date(2026, 10, 16, 12, 0, 0, 0, time.UTC)
+	cutoff := now.AddDate(0, 0, -7)
+	one, two := int64(1), int64(2)
+	es := []toggl.Entry{
+		{Start: now.AddDate(0, 0, -1), Duration: 4 * 3600, ProjectID: &one},
+		{Start: now.AddDate(0, 0, -9), Duration: 2 * 3600, ProjectID: &one},
+		{Start: now.AddDate(0, 0, -2), Duration: 3600, ProjectID: &two}, // new this week
+		{Start: now.AddDate(0, 0, -10), Duration: 5 * 3600},             // only last week
+	}
+	rows := Compare(es, map[int64]string{1: "A", 2: "B"}, now, cutoff)
+	if len(rows) != 3 {
+		t.Fatalf("rows = %+v", rows)
+	}
+	if rows[0].Project != noProject || rows[0].Delta() != -5*time.Hour {
+		t.Fatalf("biggest mover first: %+v", rows[0])
+	}
+	var out strings.Builder
+	if err := WriteCompare(&out, rows); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"+100%", "new", "-100%", "TOTAL"} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("missing %q:\n%s", want, out.String())
+		}
 	}
 }

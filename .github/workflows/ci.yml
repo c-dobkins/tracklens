@@ -24,6 +24,7 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
+          check-latest: true
       - run: test -z "$(gofmt -l .)"
       - run: go vet ./...
       - run: go test -race -coverprofile=coverage.out ./...
@@ -35,9 +36,10 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
+          check-latest: true
       - uses: golangci/golangci-lint-action@v8
         with:
-          version: v2.1
+          version: v2.5.0
   vuln:
     runs-on: ubuntu-latest
     steps:
@@ -45,6 +47,7 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
+          check-latest: true
       - run: go run golang.org/x/vuln/cmd/govulncheck@v1.1.4 ./...
   docker:
     runs-on: ubuntu-latest

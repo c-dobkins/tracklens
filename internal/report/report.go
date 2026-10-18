@@ -27,8 +27,15 @@ type Summary struct {
 
 const noProject = "(no project)"
 
+// Options tunes the data-quality checks.
+type Options struct {
+	// OverlapTolerance ignores overlaps up to this long, which absorbs the
+	// small clock slop between a timer stopping and the next one starting.
+	OverlapTolerance time.Duration
+}
+
 // Summarize groups entries by project. now is used to size running timers.
-func Summarize(entries []toggl.Entry, names map[int64]string, now time.Time) Summary {
+func Summarize(entries []toggl.Entry, names map[int64]string, now time.Time, opts Options) Summary {
 	byProject := map[string]*Row{}
 	var s Summary
 	var closed []toggl.Entry
@@ -41,14 +48,8 @@ func Summarize(entries []toggl.Entry, names map[int64]string, now time.Time) Sum
 		} else {
 			closed = append(closed, e)
 		}
-		name := noProject
-		if e.ProjectID != nil {
-			if n, ok := names[*e.ProjectID]; ok {
-				name = n
-			} else {
-				name = fmt.Sprintf("project %d", *e.ProjectID)
-			}
-		} else {
+		name := projectName(e, names)
+		if e.ProjectID == nil {
 			s.Findings = append(s.Findings, fmt.Sprintf("entry %d %q has no project", e.ID, e.Description))
 		}
 		r := byProject[name]
@@ -68,22 +69,44 @@ func Summarize(entries []toggl.Entry, names map[int64]string, now time.Time) Sum
 		s.Rows = append(s.Rows, *r)
 	}
 	sort.Slice(s.Rows, func(i, j int) bool { return s.Rows[i].Total > s.Rows[j].Total })
-	s.Findings = append(s.Findings, overlaps(closed)...)
+	s.Findings = append(s.Findings, overlaps(closed, opts.OverlapTolerance)...)
 	return s
 }
 
-// overlaps reports pairs of closed entries whose time ranges intersect.
-func overlaps(es []toggl.Entry) []string {
+// overlaps reports entries that start before the latest-ending earlier entry
+// has finished. Tracking the furthest end seen so far (rather than just the
+// previous entry) also catches one long entry that swallows several short ones.
+func overlaps(es []toggl.Entry, tolerance time.Duration) []string {
 	sorted := append([]toggl.Entry(nil), es...)
 	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Start.Before(sorted[j].Start) })
+
 	var out []string
-	for i := 1; i < len(sorted); i++ {
-		prev, cur := sorted[i-1], sorted[i]
-		if prev.Stop != nil && cur.Start.Before(*prev.Stop) {
-			out = append(out, fmt.Sprintf("entries %d and %d overlap by %s", prev.ID, cur.ID, prev.Stop.Sub(cur.Start).Round(time.Second)))
+	var latest *toggl.Entry // entry with the furthest end so far
+	for i := range sorted {
+		cur := &sorted[i]
+		if cur.Stop == nil {
+			continue
+		}
+		if latest != nil {
+			if by := latest.Stop.Sub(cur.Start); by > tolerance {
+				out = append(out, fmt.Sprintf("entries %d and %d overlap by %s", latest.ID, cur.ID, by.Round(time.Second)))
+			}
+		}
+		if latest == nil || cur.Stop.After(*latest.Stop) {
+			latest = cur
 		}
 	}
 	return out
+}
+
+func projectName(e toggl.Entry, names map[int64]string) string {
+	if e.ProjectID == nil {
+		return noProject
+	}
+	if n, ok := names[*e.ProjectID]; ok {
+		return n
+	}
+	return fmt.Sprintf("project %d", *e.ProjectID)
 }
 
 func hours(d time.Duration) string { return fmt.Sprintf("%.2f", d.Hours()) }
@@ -125,23 +148,25 @@ type DayRow struct {
 	Billable time.Duration
 }
 
-// ByDay groups entries by the calendar day (in loc) they started on, oldest first.
+// ByDay groups time by calendar day in loc, oldest first. An entry that
+// crosses midnight is split so each day gets the time actually worked on it.
 func ByDay(entries []toggl.Entry, now time.Time, loc *time.Location) []DayRow {
 	days := map[string]*DayRow{}
 	for _, e := range entries {
-		d := time.Duration(e.Duration) * time.Second
+		end := e.Start.Add(time.Duration(e.Duration) * time.Second)
 		if e.Duration < 0 {
-			d = now.Sub(e.Start)
+			end = now
 		}
-		k := e.Start.In(loc).Format("2006-01-02")
-		r := days[k]
-		if r == nil {
-			r = &DayRow{Day: k}
-			days[k] = r
-		}
-		r.Total += d
-		if e.Billable {
-			r.Billable += d
+		for _, seg := range splitDays(e.Start, end, loc) {
+			r := days[seg.day]
+			if r == nil {
+				r = &DayRow{Day: seg.day}
+				days[seg.day] = r
+			}
+			r.Total += seg.d
+			if e.Billable {
+				r.Billable += seg.d
+			}
 		}
 	}
 	out := make([]DayRow, 0, len(days))
@@ -149,6 +174,30 @@ func ByDay(entries []toggl.Entry, now time.Time, loc *time.Location) []DayRow {
 		out = append(out, *r)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Day < out[j].Day })
+	return out
+}
+
+type segment struct {
+	day string
+	d   time.Duration
+}
+
+// splitDays cuts [start, end) at each local midnight in loc. Midnights are
+// computed from the calendar, so 23- and 25-hour DST days come out right.
+func splitDays(start, end time.Time, loc *time.Location) []segment {
+	if !end.After(start) {
+		return []segment{{start.In(loc).Format("2006-01-02"), 0}}
+	}
+	var out []segment
+	for cur := start.In(loc); cur.Before(end); {
+		y, m, d := cur.Date()
+		next := time.Date(y, m, d+1, 0, 0, 0, 0, loc)
+		if next.After(end) {
+			next = end
+		}
+		out = append(out, segment{cur.Format("2006-01-02"), next.Sub(cur)})
+		cur = next.In(loc)
+	}
 	return out
 }
 

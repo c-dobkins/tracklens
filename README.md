@@ -26,6 +26,8 @@ tracklens -days 14                           # live data
 tracklens -file testdata/sample.json         # offline sample
 tracklens -file testdata/sample.json -by day -tz Europe/Tallinn   # daily totals in a time zone
 tracklens -file testdata/sample.json -format json                 # or csv
+tracklens -days 7 -compare                   # this week vs the week before, biggest movers first
+tracklens -overlap-tolerance 2m              # ignore overlaps of up to 2 minutes
 tracklens -days 14 -strict                   # exit 2 if any check fires (for CI/cron)
 ```
 
@@ -70,5 +72,7 @@ CI runs gofmt, vet, tests with a Postgres service container, golangci-lint, govu
 
 - Verified against an `httptest` fake and a real local PostgreSQL 16, not the live Toggl API. The endpoint paths are from memory of the v9 docs, so check them first.
 - There is no pagination because the time-entries endpoint is queried by date range.
-- Days are grouped by start time. An entry that crosses midnight is counted wholly on its start day.
-- Next: week-over-week comparison, configurable overlap tolerance, splitting midnight-spanning entries.
+- Entries that cross midnight are split across days in the `-tz` zone, including 23- and 25-hour DST days.
+- Overlap detection tracks the furthest-ending earlier entry, so one long entry covering several short ones is caught.
+- `-compare` works on entry start time and supports the table format only.
+- Next: JSON/CSV output for `-compare` and `-by day`, a `sync` subcommand with a scheduled GitHub Action example, structured logging, and a release workflow that publishes binaries and a container image.

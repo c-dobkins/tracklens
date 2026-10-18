@@ -35,6 +35,8 @@ type config struct {
 	sync    bool
 	history bool
 	strict  bool
+	compare bool
+	overlap time.Duration
 }
 
 type fixture struct {
@@ -55,6 +57,8 @@ func main() {
 	flag.BoolVar(&c.sync, "sync", false, "save fetched entries to the database")
 	flag.BoolVar(&c.history, "history", false, "read entries from the database instead of the API")
 	flag.BoolVar(&c.strict, "strict", false, "exit with status 2 if any data-quality finding is reported")
+	flag.BoolVar(&c.compare, "compare", false, "compare the last -days against the -days before that, by project")
+	flag.DurationVar(&c.overlap, "overlap-tolerance", 0, "ignore overlapping entries by up to this long (e.g. 2m)")
 	flag.Parse()
 
 	if *showVersion {
@@ -93,6 +97,12 @@ func (c config) validate() error {
 	default:
 		return fmt.Errorf("unknown -format %q (want table, json or csv)", c.format)
 	}
+	if c.days < 1 {
+		return errors.New("-days must be at least 1")
+	}
+	if c.compare && (c.by != "project" || c.format != "table") {
+		return errors.New("-compare supports only -by project with -format table")
+	}
 	if (c.sync || c.history) && c.dsn == "" {
 		return errors.New("-sync and -history need -db or $TRACKLENS_DATABASE_URL")
 	}
@@ -115,10 +125,13 @@ func run(ctx context.Context, c config, out io.Writer) error {
 		return err
 	}
 
+	if c.compare {
+		return report.WriteCompare(out, report.Compare(entries, names, now, now.AddDate(0, 0, -c.days)))
+	}
 	if c.by == "day" {
 		return report.WriteDays(out, report.ByDay(entries, now, c.tz))
 	}
-	s := report.Summarize(entries, names, now)
+	s := report.Summarize(entries, names, now, report.Options{OverlapTolerance: c.overlap})
 	switch c.format {
 	case "json":
 		err = s.WriteJSON(out)
@@ -135,7 +148,12 @@ func run(ctx context.Context, c config, out io.Writer) error {
 
 // load picks the data source: fixture file, stored history, or the live API.
 func load(ctx context.Context, c config, now time.Time) ([]toggl.Entry, map[int64]string, time.Time, error) {
-	from, to := now.AddDate(0, 0, -c.days), now.AddDate(0, 0, 1)
+	// -compare needs the previous window as well.
+	back := c.days
+	if c.compare {
+		back *= 2
+	}
+	from, to := now.AddDate(0, 0, -back), now.AddDate(0, 0, 1)
 
 	if c.file != "" {
 		b, err := os.ReadFile(c.file)
@@ -151,7 +169,15 @@ func load(ctx context.Context, c config, now time.Time) ([]toggl.Entry, map[int6
 			names[p.ID] = p.Name
 		}
 		// Fixed clock so sample output is stable.
-		return f.Entries, names, time.Date(2026, 10, 16, 18, 0, 0, 0, time.UTC), nil
+		fixed := time.Date(2026, 10, 16, 18, 0, 0, 0, time.UTC)
+		from = fixed.AddDate(0, 0, -back)
+		var inWindow []toggl.Entry
+		for _, e := range f.Entries {
+			if !e.Start.Before(from) {
+				inWindow = append(inWindow, e)
+			}
+		}
+		return inWindow, names, fixed, nil
 	}
 
 	if c.history {

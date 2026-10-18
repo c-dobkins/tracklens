@@ -66,3 +66,54 @@ func TestMissingTokenIsExplained(t *testing.T) {
 		t.Fatalf("err = %v", err)
 	}
 }
+
+func TestValidateRejectsBadCombos(t *testing.T) {
+	for name, mod := range map[string]func(*config){
+		"zero days":         func(c *config) { c.days = 0 },
+		"compare with day":  func(c *config) { c.compare, c.by = true, "day" },
+		"compare with json": func(c *config) { c.compare, c.format = true, "json" },
+	} {
+		c := base()
+		mod(&c)
+		if err := c.validate(); err == nil {
+			t.Errorf("%s: want error", name)
+		}
+	}
+}
+
+func TestFixtureHonoursWindow(t *testing.T) {
+	var out strings.Builder
+	if err := run(context.Background(), base(), &out); err != nil {
+		t.Fatal(err)
+	}
+	// Entries 90/91 are from the previous week and must not be counted.
+	if !strings.Contains(out.String(), "5.75") {
+		t.Fatalf("window not applied:\n%s", out.String())
+	}
+}
+
+func TestCompareFixture(t *testing.T) {
+	c := base()
+	c.compare = true
+	var out strings.Builder
+	if err := run(context.Background(), c, &out); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"THIS", "PREVIOUS", "Client portal", "Internal tooling"} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("missing %q:\n%s", want, out.String())
+		}
+	}
+}
+
+func TestOverlapToleranceFlag(t *testing.T) {
+	c := base()
+	c.overlap = 20 * time.Minute
+	var out strings.Builder
+	if err := run(context.Background(), c, &out); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(out.String(), "overlap") {
+		t.Fatalf("15m overlap should be tolerated:\n%s", out.String())
+	}
+}
