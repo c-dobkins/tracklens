@@ -21,23 +21,54 @@ Checks:
 ## Usage
 
 ```
-export TOGGL_API_TOKEN=...        # from your Toggl profile page
-go run ./cmd/tracklens -days 14   # live data
-go run ./cmd/tracklens -file testdata/sample.json
-go run ./cmd/tracklens -file testdata/sample.json -by day        # daily totals
-go run ./cmd/tracklens -file testdata/sample.json -format json   # or csv
-go test -race ./...
+export TOGGL_API_TOKEN=...                   # from your Toggl profile page
+tracklens -days 14                           # live data
+tracklens -file testdata/sample.json         # offline sample
+tracklens -file testdata/sample.json -by day -tz Europe/Tallinn   # daily totals in a time zone
+tracklens -file testdata/sample.json -format json                 # or csv
+tracklens -days 14 -strict                   # exit 2 if any check fires (for CI/cron)
 ```
+
+### History in PostgreSQL
+
+The API only returns a window of recent entries. `-sync` stores what it fetched; `-history` reports from the database with no API call.
+
+```
+export TRACKLENS_DATABASE_URL='postgres://user:pass@localhost/tracklens?sslmode=disable'
+tracklens -days 30 -sync       # upsert entries and projects (safe to repeat)
+tracklens -days 90 -history    # report from stored data
+```
+
+Schema migrations are embedded in the binary and applied on connect, under an advisory lock so concurrent runs are safe. Entries are upserted by Toggl id, so a timer that was running at the last sync is corrected once it stops.
+
+### Docker
+
+```
+make docker
+docker run --rm -e TOGGL_API_TOKEN tracklens:dev -days 7
+```
+
+## Development
+
+```
+make test     # go test -race ./...  (set TEST_DATABASE_URL to include the Postgres tests)
+make lint     # golangci-lint
+make cover
+make vuln     # govulncheck
+```
+
+CI runs gofmt, vet, tests with a Postgres service container, golangci-lint, govulncheck and a Docker build. Dependabot keeps Go modules, Actions and the base image current. See [SECURITY.md](SECURITY.md) for how secrets are handled.
 
 ## Layout
 
-- `internal/toggl` is a minimal API v9 client (basic auth, rate-limit handling, context support).
-- `internal/report` holds the pure aggregation and checks, which are easy to unit test.
-- `cmd/tracklens` is the CLI.
+- `internal/toggl`: API v9 client with basic auth, context support and retry/backoff on 429 and 5xx (honours `Retry-After`).
+- `internal/store`: PostgreSQL persistence, embedded migrations.
+- `internal/report`: pure aggregation and checks, easy to unit test.
+- `cmd/tracklens`: the CLI; `$TOGGL_API_URL` overrides the API base for tests.
 
 ## Status and limits
 
-- Tests use an `httptest` server and a fixture. I haven't run it against the live API, and the endpoint paths are from memory of the v9 docs, so check them first.
-- Requests retry with exponential backoff on 429 and 5xx, honouring `Retry-After`. There is no pagination because the time-entries endpoint is queried by date range.
-- CI runs gofmt, vet and `go test -race` on every push.
-- Possible next steps: a Postgres store for history, week-over-week comparison, configurable overlap tolerance.
+- Verified against an `httptest` fake and a real local PostgreSQL 16, not the live Toggl API. The endpoint paths are from memory of the v9 docs, so check them first.
+- There is no pagination because the time-entries endpoint is queried by date range.
+- Days are grouped by start time. An entry that crosses midnight is counted wholly on its start day.
+- Next: week-over-week comparison, configurable overlap tolerance, splitting midnight-spanning entries.

@@ -1,0 +1,30 @@
+version: "2"
+linters:
+  settings:
+    errcheck:
+      exclude-functions:
+        - (*database/sql.Tx).Rollback   # no-op after Commit; the original error matters
+        - (*database/sql.Rows).Close
+        - (*database/sql.Stmt).Close
+        - (*database/sql.DB).Close
+        - (io.Closer).Close
+  enable:
+    - errcheck
+    - govet
+    - staticcheck
+    - ineffassign
+    - unused
+    - bodyclose
+    - errorlint
+    - gosec
+    - misspell
+    - noctx
+    - rowserrcheck
+    - sqlclosecheck
+  exclusions:
+    rules:
+      - path: _test\.go
+        linters: [errcheck, gosec]
+formatters:
+  enable:
+    - gofmt

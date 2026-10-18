@@ -35,9 +35,14 @@ func (s Summary) WriteJSON(w io.Writer) error {
 // WriteCSV emits one row per project.
 func (s Summary) WriteCSV(w io.Writer) error {
 	cw := csv.NewWriter(w)
-	cw.Write([]string{"project", "hours", "billable_hours"})
+	if err := cw.Write([]string{"project", "hours", "billable_hours"}); err != nil {
+		return err
+	}
 	for _, r := range s.Rows {
-		cw.Write([]string{r.Project, strconv.FormatFloat(r.Total.Hours(), 'f', 2, 64), strconv.FormatFloat(r.Billable.Hours(), 'f', 2, 64)})
+		err := cw.Write([]string{r.Project, strconv.FormatFloat(r.Total.Hours(), 'f', 2, 64), strconv.FormatFloat(r.Billable.Hours(), 'f', 2, 64)})
+		if err != nil {
+			return err
+		}
 	}
 	cw.Flush()
 	return cw.Error()

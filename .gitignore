@@ -1,0 +1,5 @@
+/bin/
+/tracklens
+coverage.out
+.env
+*.test

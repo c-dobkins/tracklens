@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"sort"
+	"strings"
 	"text/tabwriter"
 	"time"
 
@@ -87,20 +88,27 @@ func overlaps(es []toggl.Entry) []string {
 
 func hours(d time.Duration) string { return fmt.Sprintf("%.2f", d.Hours()) }
 
-func (s Summary) Write(w io.Writer) {
-	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, "PROJECT\tHOURS\tBILLABLE\tBILLABLE %")
+// Write renders the table and any findings. Output is built in memory first
+// so a failing writer is reported once, as an error.
+func (s Summary) Write(w io.Writer) error {
+	var b strings.Builder
+	tw := tabwriter.NewWriter(&b, 0, 0, 2, ' ', 0)
+	_, _ = fmt.Fprintln(tw, "PROJECT\tHOURS\tBILLABLE\tBILLABLE %")
 	for _, r := range s.Rows {
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", r.Project, hours(r.Total), hours(r.Billable), pct(r.Billable, r.Total))
+		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", r.Project, hours(r.Total), hours(r.Billable), pct(r.Billable, r.Total))
 	}
-	fmt.Fprintf(tw, "TOTAL\t%s\t%s\t%s\n", hours(s.Total), hours(s.Billable), pct(s.Billable, s.Total))
-	tw.Flush()
+	_, _ = fmt.Fprintf(tw, "TOTAL\t%s\t%s\t%s\n", hours(s.Total), hours(s.Billable), pct(s.Billable, s.Total))
+	if err := tw.Flush(); err != nil {
+		return err
+	}
 	if len(s.Findings) > 0 {
-		fmt.Fprintln(w, "\nChecks:")
+		b.WriteString("\nChecks:\n")
 		for _, f := range s.Findings {
-			fmt.Fprintln(w, " -", f)
+			b.WriteString(" - " + f + "\n")
 		}
 	}
+	_, err := io.WriteString(w, b.String())
+	return err
 }
 
 func pct(a, b time.Duration) string {
@@ -117,15 +125,15 @@ type DayRow struct {
 	Billable time.Duration
 }
 
-// ByDay groups entries by the UTC day they started on, oldest first.
-func ByDay(entries []toggl.Entry, now time.Time) []DayRow {
+// ByDay groups entries by the calendar day (in loc) they started on, oldest first.
+func ByDay(entries []toggl.Entry, now time.Time, loc *time.Location) []DayRow {
 	days := map[string]*DayRow{}
 	for _, e := range entries {
 		d := time.Duration(e.Duration) * time.Second
 		if e.Duration < 0 {
 			d = now.Sub(e.Start)
 		}
-		k := e.Start.UTC().Format("2006-01-02")
+		k := e.Start.In(loc).Format("2006-01-02")
 		r := days[k]
 		if r == nil {
 			r = &DayRow{Day: k}
@@ -144,11 +152,16 @@ func ByDay(entries []toggl.Entry, now time.Time) []DayRow {
 	return out
 }
 
-func WriteDays(w io.Writer, rows []DayRow) {
-	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, "DAY\tHOURS\tBILLABLE")
+func WriteDays(w io.Writer, rows []DayRow) error {
+	var b strings.Builder
+	tw := tabwriter.NewWriter(&b, 0, 0, 2, ' ', 0)
+	_, _ = fmt.Fprintln(tw, "DAY\tHOURS\tBILLABLE")
 	for _, r := range rows {
-		fmt.Fprintf(tw, "%s\t%s\t%s\n", r.Day, hours(r.Total), hours(r.Billable))
+		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\n", r.Day, hours(r.Total), hours(r.Billable))
 	}
-	tw.Flush()
+	if err := tw.Flush(); err != nil {
+		return err
+	}
+	_, err := io.WriteString(w, b.String())
+	return err
 }

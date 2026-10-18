@@ -1,6 +1,7 @@
 package report
 
 import (
+	"io"
 	"strings"
 	"testing"
 	"time"
@@ -44,7 +45,7 @@ func TestByDay(t *testing.T) {
 		{Start: d2, Duration: 1800, Billable: true},
 		{Start: d1, Duration: 3600},
 		{Start: d1.Add(time.Hour), Duration: 600},
-	}, d2)
+	}, d2, time.UTC)
 	if len(rows) != 2 || rows[0].Day != "2026-10-14" || rows[0].Total != 70*time.Minute || rows[1].Billable != 30*time.Minute {
 		t.Fatalf("rows = %+v", rows)
 	}
@@ -58,5 +59,37 @@ func TestWriteJSONAndCSV(t *testing.T) {
 	}
 	if err := s.WriteCSV(&c); err != nil || c.String() != "project,hours,billable_hours\nPortal,1.00,1.00\n" {
 		t.Fatalf("csv: %v\n%q", err, c.String())
+	}
+}
+
+func TestByDayRespectsTimezone(t *testing.T) {
+	// 23:30 UTC on the 14th is already the 15th in Tokyo.
+	late := time.Date(2026, 10, 14, 23, 30, 0, 0, time.UTC)
+	tokyo, err := time.LoadLocation("Asia/Tokyo")
+	if err != nil {
+		t.Skip("tzdata unavailable")
+	}
+	if got := ByDay([]toggl.Entry{{Start: late, Duration: 60}}, late, tokyo); got[0].Day != "2026-10-15" {
+		t.Fatalf("day = %s", got[0].Day)
+	}
+	if got := ByDay([]toggl.Entry{{Start: late, Duration: 60}}, late, time.UTC); got[0].Day != "2026-10-14" {
+		t.Fatalf("day = %s", got[0].Day)
+	}
+}
+
+type failWriter struct{}
+
+func (failWriter) Write([]byte) (int, error) { return 0, io.ErrClosedPipe }
+
+func TestWritersReportErrors(t *testing.T) {
+	s := Summarize([]toggl.Entry{{ID: 1, Start: ts(9, 0), Duration: 60}}, nil, ts(10, 0))
+	if err := s.Write(failWriter{}); err == nil {
+		t.Error("Write: want error")
+	}
+	if err := s.WriteJSON(failWriter{}); err == nil {
+		t.Error("WriteJSON: want error")
+	}
+	if err := WriteDays(failWriter{}, ByDay(nil, ts(9, 0), time.UTC)); err == nil {
+		t.Error("WriteDays: want error")
 	}
 }
