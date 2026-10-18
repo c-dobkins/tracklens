@@ -227,10 +227,81 @@ func TestContextCancelStopsRetries(t *testing.T) {
 	c := newTestClient(t, func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusTooManyRequests)
 	})
-	c.backoff = time.Hour // would hang if cancellation were ignored
-	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
-	defer cancel()
-	if _, err := c.Entries(ctx, t0, t1); !errors.Is(err, context.DeadlineExceeded) {
+	c.backoff = 30 * time.Second // under the cap, so the client really waits
+	ctx, cancel := context.WithCancel(context.Background())
+	time.AfterFunc(50*time.Millisecond, cancel)
+	if _, err := c.Entries(ctx, t0, t1); !errors.Is(err, context.Canceled) {
 		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestLongRetryAfterFailsFast(t *testing.T) {
+	var calls int32
+	c := newTestClient(t, func(w http.ResponseWriter, _ *http.Request) {
+		atomic.AddInt32(&calls, 1)
+		w.Header().Set("Retry-After", "3600")
+		w.WriteHeader(http.StatusTooManyRequests)
+	})
+	_, err := c.Entries(context.Background(), t0, t1)
+	apiErr, ok := errors.AsType[*APIError](err)
+	if !ok || apiErr.StatusCode != http.StatusTooManyRequests || !strings.Contains(err.Error(), "1h0m0s") || calls != 1 {
+		t.Fatalf("err = %v, calls = %d", err, calls)
+	}
+}
+
+func TestRetryWaitBeyondDeadlineFailsFast(t *testing.T) {
+	c := newTestClient(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Retry-After", "30")
+		w.WriteHeader(http.StatusServiceUnavailable)
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	start := time.Now()
+	if _, err := c.Entries(ctx, t0, t1); err == nil || !strings.Contains(err.Error(), "503") || time.Since(start) > time.Second {
+		t.Fatalf("err = %v after %v", err, time.Since(start))
+	}
+}
+
+func TestPermanentTransportErrorsAreNotRetried(t *testing.T) {
+	tlsSrv := httptest.NewTLSServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	t.Cleanup(tlsSrv.Close)
+	for name, base := range map[string]string{
+		"no scheme":         "api.example.invalid",
+		"untrusted TLS":     tlsSrv.URL,
+		"unsupported proto": "ftp://example.invalid",
+	} {
+		t.Run(name, func(t *testing.T) {
+			c := New("tok")
+			c.BaseURL, c.backoff = base, time.Hour // a retry would hang the test
+			start := time.Now()
+			if _, err := c.Entries(context.Background(), t0, t1); err == nil || time.Since(start) > 5*time.Second {
+				t.Fatalf("err = %v after %v", err, time.Since(start))
+			}
+		})
+	}
+}
+
+func TestZeroValueClientUsesDefaults(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("User-Agent") != "tracklens" {
+			t.Errorf("User-Agent = %q", r.Header.Get("User-Agent"))
+		}
+		_, _ = w.Write([]byte(`[{"id":1},{"id":2}]`))
+	}))
+	t.Cleanup(srv.Close)
+	c := &Client{BaseURL: srv.URL, Token: "tok"} // no HTTP, page limit or backoff
+	got, err := c.Entries(context.Background(), t0, t1)
+	if err != nil || len(got) != 2 {
+		t.Fatalf("got %v, %v", got, err)
+	}
+}
+
+func TestDuplicateIDsInOneResponseAreDropped(t *testing.T) {
+	c := newTestClient(t, func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`[{"id":1},{"id":2},{"id":1}]`))
+	})
+	got, err := c.Entries(context.Background(), t0, t1)
+	if err != nil || len(got) != 2 {
+		t.Fatalf("got %v, %v", got, err)
 	}
 }

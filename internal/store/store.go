@@ -8,6 +8,7 @@ import (
 	"embed"
 	"fmt"
 	"io/fs"
+	"path"
 	"slices"
 	"time"
 
@@ -50,11 +51,11 @@ func (s *Store) Close() error { return s.db.Close() }
 // migrate applies pending migrations in name order inside one transaction,
 // holding an advisory lock so concurrent processes cannot race.
 func (s *Store) migrate(ctx context.Context) error {
-	names, err := fs.Glob(migrations, "migrations/*.sql")
+	paths, err := fs.Glob(migrations, "migrations/*.sql")
 	if err != nil {
 		return err
 	}
-	slices.Sort(names)
+	slices.Sort(paths)
 
 	return s.inTx(ctx, func(tx *sql.Tx) error {
 		if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock($1)`, migrationLock); err != nil {
@@ -64,7 +65,8 @@ func (s *Store) migrate(ctx context.Context) error {
 			name TEXT PRIMARY KEY, applied_at TIMESTAMPTZ NOT NULL DEFAULT now())`); err != nil {
 			return err
 		}
-		for _, name := range names {
+		for _, p := range paths {
+			name := path.Base(p) // recorded without the directory, e.g. "001_init.sql"
 			var done bool
 			if err := tx.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = $1)`, name).Scan(&done); err != nil {
 				return err
@@ -72,7 +74,7 @@ func (s *Store) migrate(ctx context.Context) error {
 			if done {
 				continue
 			}
-			body, err := migrations.ReadFile(name)
+			body, err := migrations.ReadFile(p)
 			if err != nil {
 				return err
 			}
@@ -87,21 +89,30 @@ func (s *Store) migrate(ctx context.Context) error {
 	})
 }
 
+// SyncOptions controls Sync.
+type SyncOptions struct {
+	// Prune deletes stored entries that started in the window but are not in
+	// entries, so entries deleted in Toggl leave the history too. Only use it
+	// when entries is the complete set the API returned for exactly that
+	// window; otherwise it deletes real history.
+	Prune bool
+}
+
 // SyncResult counts what Sync changed.
 type SyncResult struct {
 	Upserted int64
 	Deleted  int64
 }
 
-// Sync makes the stored entries that started in [from, to) match entries,
-// which must be the complete set the API returned for that window: entries are
-// inserted or updated by Toggl id (so a timer still running at the last sync
-// is corrected once it stops), and stored entries in the window that the API
-// no longer returns, because they were deleted in Toggl, are removed. Project
-// names carried by the entries are saved too. It all happens in one
-// transaction, so a failed sync leaves the previous state intact.
-func (s *Store) Sync(ctx context.Context, from, to time.Time, entries []toggl.Entry) (SyncResult, error) {
+// Sync stores entries fetched for the window [from, to). Entries are inserted
+// or updated by Toggl id, so a timer still running at the last sync is
+// corrected once it stops, and project names carried by the entries are
+// saved. With opts.Prune, stored entries in the window that are missing from
+// entries are deleted. Everything happens in one transaction, so a failed
+// sync leaves the previous state intact.
+func (s *Store) Sync(ctx context.Context, from, to time.Time, entries []toggl.Entry, opts SyncOptions) (SyncResult, error) {
 	var res SyncResult
+	entries = toggl.Dedupe(entries) // a batch upsert cannot touch one row twice
 	n := len(entries)
 	ids, workspaces, descriptions := make([]int64, n), make([]int64, n), make([]string, n)
 	projects, stops := make([]*int64, n), make([]*time.Time, n)
@@ -129,14 +140,16 @@ func (s *Store) Sync(ctx context.Context, from, to time.Time, entries []toggl.En
 			return err
 		}
 
-		r, err = tx.ExecContext(ctx, `
-			DELETE FROM time_entries
-			WHERE start_at >= $1 AND start_at < $2 AND NOT (id = ANY($3::bigint[]))`, from, to, ids)
-		if err != nil {
-			return fmt.Errorf("delete removed entries: %w", err)
-		}
-		if res.Deleted, err = r.RowsAffected(); err != nil {
-			return err
+		if opts.Prune {
+			r, err = tx.ExecContext(ctx, `
+				DELETE FROM time_entries
+				WHERE start_at >= $1 AND start_at < $2 AND NOT (id = ANY($3::bigint[]))`, from, to, ids)
+			if err != nil {
+				return fmt.Errorf("prune removed entries: %w", err)
+			}
+			if res.Deleted, err = r.RowsAffected(); err != nil {
+				return err
+			}
 		}
 
 		names := toggl.ProjectNames(entries)

@@ -326,3 +326,20 @@ func TestWritersReportErrors(t *testing.T) {
 		}
 	}
 }
+
+// The table rounds the raw percentage once; rounding the one-decimal JSON
+// value again would turn 22.46% into +23%.
+func TestPercentRoundedOnce(t *testing.T) {
+	prev := 10000 * time.Second
+	rows := Comparison{{"P", prev + 2246*time.Second, prev}} // +22.46%
+	var table, csvOut strings.Builder
+	if err := rows.WriteTable(&table); err != nil {
+		t.Fatal(err)
+	}
+	if err := rows.WriteCSV(&csvOut); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(table.String(), "+22%") || !strings.HasSuffix(csvOut.String(), ",22.5\n") {
+		t.Fatalf("table:\n%s\ncsv:\n%s", table.String(), csvOut.String())
+	}
+}

@@ -3,6 +3,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -44,6 +45,7 @@ Examples:
   tracklens -by day -tz Europe/Tallinn    # daily totals in a time zone
   tracklens -compare -format csv          # this period vs the previous one
   tracklens -days 30 -sync                # store in PostgreSQL (needs -db)
+  tracklens -days 30 -sync -prune         # ...and drop entries deleted in Toggl
   tracklens -days 90 -history             # report from PostgreSQL
 
 Environment:
@@ -66,6 +68,7 @@ type config struct {
 	tz      *time.Location
 	dsn     string
 	sync    bool
+	prune   bool
 	history bool
 	strict  bool
 	compare bool
@@ -134,7 +137,8 @@ func parseFlags(args []string, getenv env, stderr io.Writer) (config, error) {
 	fs.StringVar(&by, "by", "project", "grouping: project or day")
 	fs.StringVar(&tz, "tz", "UTC", "IANA time zone for -by day")
 	fs.StringVar(&c.dsn, "db", getenv("TRACKLENS_DATABASE_URL"), "PostgreSQL connection string (default $TRACKLENS_DATABASE_URL)")
-	fs.BoolVar(&c.sync, "sync", false, "store the fetched window in the database, removing entries deleted in Toggl")
+	fs.BoolVar(&c.sync, "sync", false, "store the fetched window in the database")
+	fs.BoolVar(&c.prune, "prune", false, "with -sync, delete stored entries in the window that Toggl no longer returns")
 	fs.BoolVar(&c.history, "history", false, "report from the database instead of the API")
 	fs.BoolVar(&c.strict, "strict", false, "exit with status 3 if any data-quality finding is reported")
 	fs.BoolVar(&c.compare, "compare", false, "compare the last -days with the -days before, by project")
@@ -177,6 +181,8 @@ func (c config) validate() error {
 		return errors.New("-overlap-tolerance cannot be negative")
 	case c.compare && c.byDay:
 		return errors.New("-compare reports by project; drop -by day")
+	case c.prune && !c.sync:
+		return errors.New("-prune only works with -sync")
 	case c.sync && c.history:
 		return errors.New("-sync and -history are mutually exclusive")
 	case (c.sync || c.history) && c.file != "":
@@ -216,6 +222,10 @@ func runReport(ctx context.Context, c config, getenv env, log *slog.Logger, out 
 	return nil
 }
 
+// clockSkew widens the window past now, so an entry whose start is slightly
+// ahead of this machine's clock (a phone running fast) is not missed.
+const clockSkew = 5 * time.Minute
+
 // dataset is the input to every report.
 type dataset struct {
 	entries []toggl.Entry
@@ -249,7 +259,7 @@ func load(ctx context.Context, c config, getenv env, log *slog.Logger) (dataset,
 	if c.compare {
 		back *= 2 // the previous period too
 	}
-	from, to := d.now.AddDate(0, 0, -back), d.now
+	from, to := d.now.AddDate(0, 0, -back), d.now.Add(clockSkew)
 	log.Debug("window", "from", from, "to", to)
 
 	var err error
@@ -258,6 +268,10 @@ func load(ctx context.Context, c config, getenv env, log *slog.Logger) (dataset,
 		log.Debug("source", "kind", "file", "path", c.file)
 		d.entries = inWindow(fixed.Entries, from, to)
 		d.names = toggl.ProjectNames(d.entries)
+		if len(d.entries) == 0 && len(fixed.Entries) > 0 {
+			log.Warn("no fixture entries fall in the window; set \"now\" in the file or raise -days",
+				"entries", len(fixed.Entries), "from", from.Format(time.RFC3339))
+		}
 	case c.history:
 		log.Debug("source", "kind", "history")
 		d.entries, d.names, err = loadHistory(ctx, c.dsn, from, to)
@@ -266,7 +280,7 @@ func load(ctx context.Context, c config, getenv env, log *slog.Logger) (dataset,
 		if d.entries, err = loadAPI(ctx, getenv, from, to); err == nil {
 			d.names = toggl.ProjectNames(d.entries)
 			if c.sync {
-				err = syncStore(ctx, c.dsn, from, to, d.entries, log)
+				err = syncStore(ctx, c.dsn, from, to, d.entries, store.SyncOptions{Prune: c.prune}, log)
 			}
 		}
 	}
@@ -300,13 +314,13 @@ func loadAPI(ctx context.Context, getenv env, from, to time.Time) ([]toggl.Entry
 	return api.Entries(ctx, from, to)
 }
 
-func syncStore(ctx context.Context, dsn string, from, to time.Time, entries []toggl.Entry, log *slog.Logger) error {
+func syncStore(ctx context.Context, dsn string, from, to time.Time, entries []toggl.Entry, opts store.SyncOptions, log *slog.Logger) error {
 	st, err := store.Open(ctx, dsn)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = st.Close() }()
-	res, err := st.Sync(ctx, from, to, entries)
+	res, err := st.Sync(ctx, from, to, entries, opts)
 	if err != nil {
 		return fmt.Errorf("sync: %w", err)
 	}
@@ -321,7 +335,9 @@ func readFixture(path string) (fixture, error) {
 	if err != nil {
 		return f, err
 	}
-	if err := json.Unmarshal(b, &f); err != nil {
+	dec := json.NewDecoder(bytes.NewReader(b))
+	dec.DisallowUnknownFields() // an outdated or mistyped fixture fails loudly
+	if err := dec.Decode(&f); err != nil {
 		return f, fmt.Errorf("%s: %w", path, err)
 	}
 	return f, nil

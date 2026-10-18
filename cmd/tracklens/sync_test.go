@@ -14,7 +14,7 @@ import (
 )
 
 // End to end: fake Toggl API -> -sync into PostgreSQL -> -history with the
-// API gone. A second sync after an entry is deleted in Toggl removes it.
+// API gone. After an entry is deleted in Toggl, only -sync -prune removes it.
 func TestSyncThenHistory(t *testing.T) {
 	dsn := testdb.DSN(t)
 	start := time.Now().UTC().Add(-3 * time.Hour).Truncate(time.Second)
@@ -42,7 +42,10 @@ func TestSyncThenHistory(t *testing.T) {
 
 	remaining := entries[:1] // entry 2 deleted in Toggl
 	served.Store(&remaining)
-	if code, _, errOut := runCLI(t, vars, "-sync"); code != exitOK || !strings.Contains(errOut, "entries=1 removed=1") {
+	if code, _, errOut := runCLI(t, vars, "-sync"); code != exitOK || !strings.Contains(errOut, "entries=1 removed=0") {
+		t.Fatalf("sync without -prune must keep history: exit %d: %s", code, errOut)
+	}
+	if code, _, errOut := runCLI(t, vars, "-sync", "-prune"); code != exitOK || !strings.Contains(errOut, "entries=1 removed=1") {
 		t.Fatalf("second sync: exit %d: %s", code, errOut)
 	}
 

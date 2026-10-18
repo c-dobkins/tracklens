@@ -2,6 +2,8 @@ package store
 
 import (
 	"context"
+	"database/sql"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -42,14 +44,14 @@ func TestSyncUpsertsAndCorrectsRunningTimers(t *testing.T) {
 	running := toggl.Entry{ID: 1, WorkspaceID: 3, ProjectID: new(int64(5)), ProjectName: "Portal",
 		Description: "work", Billable: true, Start: start, Duration: -1}
 
-	if _, err := s.Sync(ctx, day, day.AddDate(0, 0, 1), []toggl.Entry{running}); err != nil {
+	if _, err := s.Sync(ctx, day, day.AddDate(0, 0, 1), []toggl.Entry{running}, SyncOptions{}); err != nil {
 		t.Fatal(err)
 	}
 
 	stopped := running
 	stopped.Stop, stopped.Duration = new(start.Add(time.Hour)), 3600
 	noProject := toggl.Entry{ID: 2, Start: start.Add(2 * time.Hour), Duration: 60}
-	res, err := s.Sync(ctx, day, day.AddDate(0, 0, 1), []toggl.Entry{stopped, noProject})
+	res, err := s.Sync(ctx, day, day.AddDate(0, 0, 1), []toggl.Entry{stopped, noProject}, SyncOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -73,18 +75,22 @@ func TestSyncUpsertsAndCorrectsRunningTimers(t *testing.T) {
 	}
 }
 
-func TestSyncRemovesEntriesDeletedInTogglOnlyInsideTheWindow(t *testing.T) {
+func TestSyncPruneRemovesEntriesDeletedInTogglOnlyInsideTheWindow(t *testing.T) {
 	s := openTest(t)
 	ctx := t.Context()
 	yesterday := toggl.Entry{ID: 10, Start: day.Add(-12 * time.Hour), Duration: 60}
 	keep := toggl.Entry{ID: 11, Start: day.Add(9 * time.Hour), Duration: 60}
 	deleted := toggl.Entry{ID: 12, Start: day.Add(10 * time.Hour), Duration: 60}
 
-	if _, err := s.Sync(ctx, day.AddDate(0, 0, -1), day.AddDate(0, 0, 1), []toggl.Entry{yesterday, keep, deleted}); err != nil {
+	if _, err := s.Sync(ctx, day.AddDate(0, 0, -1), day.AddDate(0, 0, 1), []toggl.Entry{yesterday, keep, deleted}, SyncOptions{}); err != nil {
 		t.Fatal(err)
 	}
-	// Re-sync only today; the API no longer returns entry 12.
-	res, err := s.Sync(ctx, day, day.AddDate(0, 0, 1), []toggl.Entry{keep})
+	// Without Prune, a missing entry is left alone.
+	if res, err := s.Sync(ctx, day, day.AddDate(0, 0, 1), []toggl.Entry{keep}, SyncOptions{}); err != nil || res.Deleted != 0 {
+		t.Fatalf("unpruned sync: %+v, %v", res, err)
+	}
+	// Re-sync only today with Prune; the API no longer returns entry 12.
+	res, err := s.Sync(ctx, day, day.AddDate(0, 0, 1), []toggl.Entry{keep}, SyncOptions{Prune: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -94,7 +100,7 @@ func TestSyncRemovesEntriesDeletedInTogglOnlyInsideTheWindow(t *testing.T) {
 	}
 
 	// An empty window from the API clears that window.
-	if res, err := s.Sync(ctx, day, day.AddDate(0, 0, 1), nil); err != nil || res.Deleted != 1 {
+	if res, err := s.Sync(ctx, day, day.AddDate(0, 0, 1), nil, SyncOptions{Prune: true}); err != nil || res.Deleted != 1 {
 		t.Fatalf("empty sync: %+v, %v", res, err)
 	}
 }
@@ -103,7 +109,7 @@ func TestEntriesWindowIsHalfOpen(t *testing.T) {
 	s := openTest(t)
 	ctx := t.Context()
 	atEnd := toggl.Entry{ID: 1, Start: day.AddDate(0, 0, 1), Duration: 60}
-	if _, err := s.Sync(ctx, day, day.AddDate(0, 0, 2), []toggl.Entry{atEnd}); err != nil {
+	if _, err := s.Sync(ctx, day, day.AddDate(0, 0, 2), []toggl.Entry{atEnd}, SyncOptions{}); err != nil {
 		t.Fatal(err)
 	}
 	if got := entriesOn(t, s, day, day.AddDate(0, 0, 1)); len(got) != 0 {
@@ -137,5 +143,62 @@ func TestMigrationsAreConcurrentSafeAndIdempotent(t *testing.T) {
 				t.Fatalf("round %d: %v", round, err)
 			}
 		}
+	}
+}
+
+func TestSyncToleratesDuplicateIDs(t *testing.T) {
+	s := openTest(t)
+	e := toggl.Entry{ID: 1, Start: day.Add(time.Hour), Duration: 60}
+	if res, err := s.Sync(t.Context(), day, day.AddDate(0, 0, 1), []toggl.Entry{e, e}, SyncOptions{}); err != nil || res.Upserted != 1 {
+		t.Fatalf("%+v, %v", res, err)
+	}
+}
+
+// A database migrated by an earlier release must only get the new migrations.
+func TestUpgradeAppliesOnlyNewMigrations(t *testing.T) {
+	dsn := testdb.DSN(t)
+	db, err := sql.Open("pgx", dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	initSQL, err := migrations.ReadFile("migrations/001_init.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := t.Context()
+	for _, stmt := range []string{
+		`CREATE TABLE schema_migrations (name TEXT PRIMARY KEY, applied_at TIMESTAMPTZ NOT NULL DEFAULT now())`,
+		string(initSQL),
+		`INSERT INTO schema_migrations (name) VALUES ('001_init.sql')`,
+	} {
+		if _, err := db.ExecContext(ctx, stmt); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	s, err := Open(ctx, dsn)
+	if err != nil {
+		t.Fatalf("upgrade failed: %v", err)
+	}
+	defer s.Close()
+	var applied []string
+	rows, err := db.QueryContext(ctx, `SELECT name FROM schema_migrations ORDER BY name`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var n string
+		if err := rows.Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		applied = append(applied, n)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(applied, []string{"001_init.sql", "002_workspace.sql"}) {
+		t.Fatalf("applied = %v", applied)
 	}
 }

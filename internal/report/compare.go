@@ -95,7 +95,7 @@ func (c Comparison) WriteJSON(w io.Writer) error {
 	for _, r := range c {
 		x := row{r.Project, roundHours(r.Current), roundHours(r.Previous), roundHours(r.Delta()), nil}
 		if p, ok := changePercent(r.Current, r.Previous); ok {
-			x.Percent = &p
+			x.Percent = new(round1(p))
 		}
 		out = append(out, x)
 	}
@@ -111,7 +111,7 @@ func (c Comparison) WriteCSV(w io.Writer) error {
 	for _, r := range c {
 		pct := ""
 		if p, ok := changePercent(r.Current, r.Previous); ok {
-			pct = strconv.FormatFloat(p, 'f', 1, 64)
+			pct = strconv.FormatFloat(round1(p), 'f', 1, 64)
 		}
 		rows = append(rows, []string{r.Project, fmtHours(r.Current), fmtHours(r.Previous), fmtHours(r.Delta()), pct})
 	}

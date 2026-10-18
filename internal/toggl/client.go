@@ -2,16 +2,19 @@
 package toggl
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"math/rand/v2"
+	"net"
 	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -92,7 +95,8 @@ func (e *APIError) retryable() bool {
 	return e.StatusCode == http.StatusTooManyRequests || e.StatusCode >= 500
 }
 
-// Client calls the Toggl Track API. Create one with New.
+// Client calls the Toggl Track API. New returns one with defaults; a zero
+// value for any field below also falls back to the default.
 type Client struct {
 	BaseURL   string
 	Token     string
@@ -105,20 +109,27 @@ type Client struct {
 
 // New returns a client for the production API.
 func New(token string) *Client {
-	return &Client{
-		BaseURL:   DefaultBaseURL,
-		Token:     token,
-		UserAgent: "tracklens",
-		HTTP:      &http.Client{Timeout: 30 * time.Second},
-		backoff:   time.Second,
-		pageLimit: MaxEntriesPerRequest,
+	return &Client{Token: token, HTTP: &http.Client{Timeout: 30 * time.Second}}
+}
+
+func (c *Client) baseURL() string   { return cmp.Or(c.BaseURL, DefaultBaseURL) }
+func (c *Client) userAgent() string { return cmp.Or(c.UserAgent, "tracklens") }
+func (c *Client) limit() int        { return cmp.Or(c.pageLimit, MaxEntriesPerRequest) }
+func (c *Client) base() time.Duration {
+	return cmp.Or(c.backoff, time.Second)
+}
+
+func (c *Client) httpClient() *http.Client {
+	if c.HTTP == nil {
+		return http.DefaultClient
 	}
+	return c.HTTP
 }
 
 // Entries returns the entries that started in [start, end), with project
 // names filled in. A response at the API's size cap is split in half and
 // fetched again until every part is complete, so large windows are not
-// silently truncated.
+// silently truncated. Each entry appears once.
 func (c *Client) Entries(ctx context.Context, start, end time.Time) ([]Entry, error) {
 	var got []Entry
 	q := url.Values{
@@ -129,13 +140,13 @@ func (c *Client) Entries(ctx context.Context, start, end time.Time) ([]Entry, er
 	if err := c.get(ctx, "/me/time_entries", q, &got); err != nil {
 		return nil, err
 	}
-	if len(got) < c.pageLimit {
-		return got, nil
+	if len(got) < c.limit() {
+		return Dedupe(got), nil
 	}
 
 	mid := start.Add(end.Sub(start) / 2).Truncate(time.Second)
 	if !mid.After(start) {
-		return nil, fmt.Errorf("toggl: more than %d entries start at %s; cannot split further", c.pageLimit, start.Format(time.RFC3339))
+		return nil, fmt.Errorf("toggl: more than %d entries start at %s; cannot split further", c.limit(), start.Format(time.RFC3339))
 	}
 	first, err := c.Entries(ctx, start, mid)
 	if err != nil {
@@ -145,14 +156,15 @@ func (c *Client) Entries(ctx context.Context, start, end time.Time) ([]Entry, er
 	if err != nil {
 		return nil, err
 	}
-	return dedupe(append(first, second...)), nil
+	// Both halves can contain an entry that starts exactly on mid if the API
+	// treats both bounds as inclusive.
+	return Dedupe(append(first, second...)), nil
 }
 
-// dedupe drops repeated ids, which appear if the API treats both window
-// bounds as inclusive and an entry starts exactly on a split point.
-func dedupe(es []Entry) []Entry {
+// Dedupe drops entries whose id was already seen, keeping the first.
+func Dedupe(es []Entry) []Entry {
 	seen := make(map[int64]bool, len(es))
-	out := es[:0]
+	out := make([]Entry, 0, len(es))
 	for _, e := range es {
 		if !seen[e.ID] {
 			seen[e.ID] = true
@@ -162,11 +174,15 @@ func dedupe(es []Entry) []Entry {
 	return out
 }
 
-// get decodes a GET response into out, retrying 429s, 5xx and network
-// errors with exponential backoff and jitter. A Retry-After header, when
-// present, is used as the wait instead.
+// maxRetryWait caps how long a single retry may wait. A server asking for
+// longer gets its error returned straight away rather than a silent stall.
+const maxRetryWait = time.Minute
+
+// get decodes a GET response into out, retrying 429s, 5xx and transient
+// network errors with exponential backoff and jitter. A Retry-After header,
+// when present, is used as the wait instead.
 func (c *Client) get(ctx context.Context, path string, q url.Values, out any) error {
-	u := c.BaseURL + path
+	u := c.baseURL() + path
 	if len(q) > 0 {
 		u += "?" + q.Encode()
 	}
@@ -180,7 +196,11 @@ func (c *Client) get(ctx context.Context, path string, q url.Values, out any) er
 		}
 		wait := retryAfter
 		if wait < 0 {
-			wait = c.backoff<<attempt + time.Duration(rand.Int64N(int64(c.backoff/2)+1)) //nolint:gosec // jitter, not security
+			b := c.base()
+			wait = b<<attempt + time.Duration(rand.Int64N(int64(b/2)+1)) //nolint:gosec // jitter, not security
+		}
+		if deadline, ok := ctx.Deadline(); wait > maxRetryWait || ok && time.Until(deadline) < wait {
+			return fmt.Errorf("%w (server asked to wait %s; not retrying)", err, wait.Round(time.Second))
 		}
 		t := time.NewTimer(wait)
 		select {
@@ -193,6 +213,16 @@ func (c *Client) get(ctx context.Context, path string, q url.Values, out any) er
 	panic("unreachable")
 }
 
+// decodeError marks a response that arrived but could not be decoded;
+// retrying will not help.
+type decodeError struct{ err error }
+
+func (e decodeError) Error() string { return "toggl: decode response: " + e.err.Error() }
+func (e decodeError) Unwrap() error { return e.err }
+
+// retryable reports whether err is worth another attempt: rate limiting,
+// server errors, timeouts and dropped connections. Bad URLs, TLS failures,
+// client errors and undecodable bodies are final.
 func retryable(ctx context.Context, err error) bool {
 	if ctx.Err() != nil {
 		return false
@@ -200,12 +230,14 @@ func retryable(ctx context.Context, err error) bool {
 	if apiErr, ok := errors.AsType[*APIError](err); ok {
 		return apiErr.retryable()
 	}
-	_, isSyntax := errors.AsType[*json.SyntaxError](err)
-	_, isType := errors.AsType[*json.UnmarshalTypeError](err)
-	if isSyntax || isType {
-		return false // a malformed body will not improve on retry
+	if _, ok := errors.AsType[decodeError](err); ok {
+		return false
 	}
-	return true // transport errors
+	if netErr, ok := errors.AsType[net.Error](err); ok && netErr.Timeout() {
+		return true
+	}
+	return errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) ||
+		errors.Is(err, syscall.ECONNRESET) || errors.Is(err, syscall.ECONNREFUSED)
 }
 
 // do performs one request. retryAfter is the server's Retry-After, or -1.
@@ -217,9 +249,9 @@ func (c *Client) do(ctx context.Context, u, path string, out any) (retryAfter ti
 	}
 	req.SetBasicAuth(c.Token, "api_token")
 	req.Header.Set("Accept", "application/json")
-	req.Header.Set("User-Agent", c.UserAgent)
+	req.Header.Set("User-Agent", c.userAgent())
 
-	resp, err := c.HTTP.Do(req)
+	resp, err := c.httpClient().Do(req)
 	if err != nil {
 		return retryAfter, err
 	}
@@ -229,7 +261,10 @@ func (c *Client) do(ctx context.Context, u, path string, out any) (retryAfter ti
 	}()
 
 	if resp.StatusCode == http.StatusOK {
-		return retryAfter, json.NewDecoder(io.LimitReader(resp.Body, maxBodyBytes)).Decode(out)
+		if err := json.NewDecoder(io.LimitReader(resp.Body, maxBodyBytes)).Decode(out); err != nil {
+			return retryAfter, decodeError{err}
+		}
+		return retryAfter, nil
 	}
 	if s, perr := strconv.Atoi(resp.Header.Get("Retry-After")); perr == nil && s >= 0 {
 		retryAfter = time.Duration(s) * time.Second

@@ -27,7 +27,7 @@ Checks:
 go install github.com/c-dobkins/p1/cmd/tracklens@latest
 ```
 
-Or download a binary from the [releases page](https://github.com/c-dobkins/p1/releases), or use the container image `ghcr.io/c-dobkins/p1`.
+Once a version is tagged, binaries are also on the [releases page](https://github.com/c-dobkins/p1/releases) and the image is at `ghcr.io/c-dobkins/p1`. The repository has to be public for `go install` to work for other people.
 
 ## Usage
 
@@ -54,19 +54,21 @@ The API only covers recent entries. `-sync` stores the fetched window, and `-his
 
 ```
 export TRACKLENS_DATABASE_URL='postgres://user:pass@localhost/tracklens?sslmode=verify-full'
-tracklens -days 30 -sync       # make the stored window match Toggl
-tracklens -days 90 -history    # report from stored data
+tracklens -days 30 -sync          # upsert the last 30 days
+tracklens -days 30 -sync -prune   # ...and drop stored entries Toggl no longer returns
+tracklens -days 90 -history       # report from stored data
 ```
 
-A sync is one transaction. It upserts entries by Toggl id, so a timer that was running at the last sync is corrected once it stops. It also deletes stored entries in the window that Toggl no longer returns, so entries deleted in Toggl disappear from the history too. Migrations are embedded in the binary and applied on connect under an advisory lock, so several processes can start at once safely.
+A sync is one transaction. It upserts entries by Toggl id, so a timer that was running at the last sync is corrected once it stops. Deletion is opt-in: with `-prune`, stored entries in the window that Toggl no longer returns are removed, so entries deleted in Toggl leave the history too. It is opt-in because it trusts the API response to be the complete window. Migrations are embedded in the binary and applied on connect under an advisory lock, so several processes can start at once safely.
 
-`.github/workflows/sync.yml` runs a daily sync. It stays off until you set the repository variable `ENABLE_SYNC=true` and add the secrets `TOGGL_API_TOKEN` and `TRACKLENS_DATABASE_URL`.
+`.github/workflows/sync.yml` runs a daily sync (without `-prune`). It stays off until you set the repository variable `ENABLE_SYNC=true` and add the secrets `TOGGL_API_TOKEN` and `TRACKLENS_DATABASE_URL`.
 
 ## How it talks to the API
 
 - It uses `GET /me/time_entries` with RFC3339 `start_date`/`end_date` and `meta=true`. Project names come back on each entry, so projects in every workspace are named without extra calls.
 - The endpoint returns at most 1000 entries per call. A full response is treated as possibly truncated: the window is halved and fetched again until every part is complete, and entries on a split point are de-duplicated.
-- 429, 5xx and network errors are retried up to four times with exponential backoff and jitter. A `Retry-After` header is used as-is when present. 401, 402 and 403 are not retried, and the error message says what to check.
+- 429, 5xx, timeouts and dropped connections are retried up to four times with exponential backoff and jitter. A `Retry-After` header is used as-is when present, but a wait longer than a minute, or past the deadline, returns the error at once. Client errors (401, 402, 403, ...), TLS failures, bad URLs and undecodable bodies are not retried, and the message says what to check.
+- The window ends 5 minutes past the local clock, so entries from a device whose clock runs slightly fast are not missed.
 - Requests send a `User-Agent` with the version. Response bodies are size-limited, and error bodies are included in messages.
 
 ## Design
@@ -112,4 +114,4 @@ All actions are pinned by commit SHA and kept current by Dependabot. Tagging `vX
 
 ## License
 
-[MIT](LICENSE)
+[MIT](LICENSE). See [CHANGELOG.md](CHANGELOG.md) for changes.

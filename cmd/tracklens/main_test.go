@@ -73,6 +73,7 @@ func TestUsageErrors(t *testing.T) {
 		"sync with file":     {"-sync", "-db", "x", "-file", sample},
 		"history no db":      {"-history"},
 		"sync with project":  {"-sync", "-db", "x", "-project", "a"},
+		"prune without sync": {"-prune", "-db", "x"},
 	}
 	for name, args := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -143,5 +144,39 @@ func TestVerboseLogging(t *testing.T) {
 	_, _, loud := runCLI(t, nil, "-file", sample, "-v")
 	if quiet != "" || !strings.Contains(loud, "kind=file") {
 		t.Fatalf("quiet %q, verbose %q", quiet, loud)
+	}
+}
+
+func writeFixture(t *testing.T, body string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "fixture.json")
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func TestFixtureRejectsUnknownFields(t *testing.T) {
+	old := writeFixture(t, `{"projects": [], "entries": []}`) // the pre-meta format
+	if code, _, errOut := runCLI(t, nil, "-file", old); code != exitError || !strings.Contains(errOut, "projects") {
+		t.Fatalf("exit %d: %s", code, errOut)
+	}
+}
+
+func TestEmptyWindowWarns(t *testing.T) {
+	stale := writeFixture(t, `{"entries": [{"id": 1, "start": "2020-01-01T09:00:00Z", "duration": 60}]}`)
+	code, _, errOut := runCLI(t, nil, "-file", stale)
+	if code != exitOK || !strings.Contains(errOut, "no fixture entries fall in the window") {
+		t.Fatalf("exit %d: %s", code, errOut)
+	}
+}
+
+func TestClockSkewSlack(t *testing.T) {
+	// The entry starts two minutes after "now", as if its device clock ran fast.
+	ahead := writeFixture(t, `{"now": "2026-10-16T18:00:00Z",
+		"entries": [{"id": 1, "start": "2026-10-16T18:02:00Z", "duration": -1}]}`)
+	_, out, _ := runCLI(t, nil, "-file", ahead, "-format", "json")
+	if !strings.Contains(out, `"kind": "running"`) {
+		t.Fatalf("entry ahead of the clock was dropped:\n%s", out)
 	}
 }

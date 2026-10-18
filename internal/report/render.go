@@ -56,14 +56,17 @@ func roundHours(d time.Duration) float64 { return math.Round(d.Hours()*100) / 10
 
 func fmtHours(d time.Duration) string { return strconv.FormatFloat(roundHours(d), 'f', 2, 64) }
 
-// changePercent is the change from prev to cur in percent, one decimal, and
-// false when there is no previous value to compare against.
+// changePercent is the unrounded change from prev to cur in percent, and
+// false when there is no previous value to compare against. Each output
+// rounds it once, to its own precision.
 func changePercent(cur, prev time.Duration) (float64, bool) {
 	if prev <= 0 {
 		return 0, false
 	}
-	return math.Round(1000*float64(cur-prev)/float64(prev)) / 10, true
+	return 100 * float64(cur-prev) / float64(prev), true
 }
+
+func round1(f float64) float64 { return math.Round(f*10) / 10 }
 
 // table builds tab-aligned output in memory so a failing writer is reported
 // once, as an error, rather than after a partial write.
