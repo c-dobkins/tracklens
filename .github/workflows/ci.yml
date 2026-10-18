@@ -48,7 +48,14 @@ jobs:
         with:
           go-version-file: go.mod
           check-latest: true
-      - run: go run golang.org/x/vuln/cmd/govulncheck@v1.1.4 ./...
+      - name: govulncheck
+        run: |
+          if ! go run golang.org/x/vuln/cmd/govulncheck@v1.1.4 ./... > vuln.txt 2>&1; then
+            cat vuln.txt
+            # Surface the report as an annotation so it is visible without opening logs.
+            echo "::error title=govulncheck::$(head -c 3000 vuln.txt | sed ':a;N;$!ba;s/\n/%0A/g')"
+            exit 1
+          fi
   docker:
     runs-on: ubuntu-latest
     steps:
