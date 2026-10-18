@@ -47,11 +47,11 @@ Schema migrations are embedded in the binary and applied on connect, under an ad
 
 ### Scheduled sync
 
- runs a daily  of the last 14 days. It is off until you set the repository variable  and add the secrets  and ; it can also be run by hand from the Actions tab.
+`.github/workflows/sync.yml` runs a daily `-sync` of the last 14 days. It is off until you set the repository variable `ENABLE_SYNC=true` and add the secrets `TOGGL_API_TOKEN` and `TRACKLENS_DATABASE_URL`; it can also be run by hand from the Actions tab.
 
 ### Releases
 
-Pushing a tag such as  runs : it tests, builds binaries for Linux, macOS and Windows (amd64 and arm64 where applicable) with a  file, creates a GitHub release, and pushes an image to .
+Pushing a tag such as `v0.1.0` runs `release.yml`: it tests, builds binaries for Linux, macOS and Windows (amd64 and arm64 where applicable) with a `SHA256SUMS` file, creates a GitHub release, and pushes an image to `ghcr.io/c-dobkins/p1`.
 
 ### Docker
 
@@ -84,5 +84,6 @@ CI runs gofmt, vet, tests with a Postgres service container, golangci-lint, govu
 - There is no pagination because the time-entries endpoint is queried by date range.
 - Entries that cross midnight are split across days in the `-tz` zone, including 23- and 25-hour DST days.
 - Overlap detection tracks the furthest-ending earlier entry, so one long entry covering several short ones is caught.
-- `-compare` works on entry start time and supports the table format only.
-- Next: JSON/CSV output for `-compare` and `-by day`, a `sync` subcommand with a scheduled GitHub Action example, structured logging, and a release workflow that publishes binaries and a container image.
+- `-compare` works on entry start time. Every view supports `-format table|json|csv`; JSON and CSV round hours to two decimals, and `change_percent` is null (JSON) or empty (CSV) for a project with no earlier time.
+- The release and sync workflows have not run yet. The release build script was run locally for all five targets, and all workflows pass actionlint with shellcheck.
+- Next: a `-project` filter, a weekly Slack/email digest, and a small HTTP mode that serves the same reports.
