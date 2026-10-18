@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
 
@@ -9,9 +10,11 @@ import (
 	"github.com/c-dobkins/p1/internal/toggl"
 )
 
+var day = time.Date(2026, 10, 15, 0, 0, 0, 0, time.UTC)
+
 func openTest(t *testing.T) *Store {
 	t.Helper()
-	s, err := Open(context.Background(), testdb.DSN(t))
+	s, err := Open(t.Context(), testdb.DSN(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -19,60 +22,120 @@ func openTest(t *testing.T) *Store {
 	return s
 }
 
-func TestSaveAndReadBack(t *testing.T) {
-	s := openTest(t)
-	ctx := context.Background()
-	start := time.Date(2026, 10, 15, 9, 0, 0, 0, time.UTC)
-	pid := int64(5)
-
-	running := toggl.Entry{ID: 1, ProjectID: &pid, Description: "work", Billable: true, Start: start, Duration: -1}
-	if err := s.SaveEntries(ctx, []toggl.Entry{running}); err != nil {
-		t.Fatal(err)
-	}
-
-	// Re-sync after the timer stopped: same id must update, not duplicate.
-	stop := start.Add(time.Hour)
-	stopped := running
-	stopped.Stop, stopped.Duration = &stop, 3600
-	if err := s.SaveEntries(ctx, []toggl.Entry{stopped, {ID: 2, Start: start.Add(2 * time.Hour), Duration: 60}}); err != nil {
-		t.Fatal(err)
-	}
-
-	got, err := s.Entries(ctx, start, start.AddDate(0, 0, 1))
+func entriesOn(t *testing.T, s *Store, from, to time.Time) map[int64]toggl.Entry {
+	t.Helper()
+	es, err := s.Entries(t.Context(), from, to)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(got) != 2 {
-		t.Fatalf("got %d entries, want 2", len(got))
+	out := map[int64]toggl.Entry{}
+	for _, e := range es {
+		out[e.ID] = e
 	}
-	if got[0].Duration != 3600 || got[0].Stop == nil || !got[0].Stop.Equal(stop) || *got[0].ProjectID != 5 || !got[0].Billable {
-		t.Fatalf("entry 1 not updated: %+v", got[0])
-	}
-	if got[1].ProjectID != nil || got[1].Stop != nil {
-		t.Fatalf("entry 2 nulls lost: %+v", got[1])
+	return out
+}
+
+func TestSyncUpsertsAndCorrectsRunningTimers(t *testing.T) {
+	s := openTest(t)
+	ctx := t.Context()
+	start := day.Add(9 * time.Hour)
+	running := toggl.Entry{ID: 1, WorkspaceID: 3, ProjectID: new(int64(5)), ProjectName: "Portal",
+		Description: "work", Billable: true, Start: start, Duration: -1}
+
+	if _, err := s.Sync(ctx, day, day.AddDate(0, 0, 1), []toggl.Entry{running}); err != nil {
+		t.Fatal(err)
 	}
 
-	// The window is half-open on start time.
-	none, err := s.Entries(ctx, start.AddDate(0, 0, 1), start.AddDate(0, 0, 2))
-	if err != nil || len(none) != 0 {
-		t.Fatalf("outside window: %v, %v", none, err)
+	stopped := running
+	stopped.Stop, stopped.Duration = new(start.Add(time.Hour)), 3600
+	noProject := toggl.Entry{ID: 2, Start: start.Add(2 * time.Hour), Duration: 60}
+	res, err := s.Sync(ctx, day, day.AddDate(0, 0, 1), []toggl.Entry{stopped, noProject})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Upserted != 2 || res.Deleted != 0 {
+		t.Fatalf("result = %+v", res)
+	}
+
+	got := entriesOn(t, s, day, day.AddDate(0, 0, 1))
+	e1 := got[1]
+	if len(got) != 2 || e1.Duration != 3600 || e1.Stop == nil || !e1.Stop.Equal(*stopped.Stop) ||
+		*e1.ProjectID != 5 || e1.WorkspaceID != 3 || !e1.Billable || e1.Description != "work" {
+		t.Fatalf("entry 1 not updated: %+v", e1)
+	}
+	if got[2].ProjectID != nil || got[2].Stop != nil {
+		t.Fatalf("entry 2 nulls lost: %+v", got[2])
+	}
+
+	names, err := s.Projects(ctx)
+	if err != nil || names[5] != "Portal" {
+		t.Fatalf("projects = %v, %v", names, err)
 	}
 }
 
-func TestProjectsRoundTripAndMigrateTwice(t *testing.T) {
+func TestSyncRemovesEntriesDeletedInTogglOnlyInsideTheWindow(t *testing.T) {
 	s := openTest(t)
-	ctx := context.Background()
-	if err := s.SaveProjects(ctx, map[int64]string{1: "A"}); err != nil {
+	ctx := t.Context()
+	yesterday := toggl.Entry{ID: 10, Start: day.Add(-12 * time.Hour), Duration: 60}
+	keep := toggl.Entry{ID: 11, Start: day.Add(9 * time.Hour), Duration: 60}
+	deleted := toggl.Entry{ID: 12, Start: day.Add(10 * time.Hour), Duration: 60}
+
+	if _, err := s.Sync(ctx, day.AddDate(0, 0, -1), day.AddDate(0, 0, 1), []toggl.Entry{yesterday, keep, deleted}); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.SaveProjects(ctx, map[int64]string{1: "A renamed", 2: "B"}); err != nil {
+	// Re-sync only today; the API no longer returns entry 12.
+	res, err := s.Sync(ctx, day, day.AddDate(0, 0, 1), []toggl.Entry{keep})
+	if err != nil {
 		t.Fatal(err)
 	}
-	if err := s.migrate(ctx); err != nil { // idempotent
+	got := entriesOn(t, s, day.AddDate(0, 0, -1), day.AddDate(0, 0, 1))
+	if res.Deleted != 1 || len(got) != 2 || got[10].ID != 10 || got[11].ID != 11 {
+		t.Fatalf("result %+v, entries %v", res, got)
+	}
+
+	// An empty window from the API clears that window.
+	if res, err := s.Sync(ctx, day, day.AddDate(0, 0, 1), nil); err != nil || res.Deleted != 1 {
+		t.Fatalf("empty sync: %+v, %v", res, err)
+	}
+}
+
+func TestEntriesWindowIsHalfOpen(t *testing.T) {
+	s := openTest(t)
+	ctx := t.Context()
+	atEnd := toggl.Entry{ID: 1, Start: day.AddDate(0, 0, 1), Duration: 60}
+	if _, err := s.Sync(ctx, day, day.AddDate(0, 0, 2), []toggl.Entry{atEnd}); err != nil {
 		t.Fatal(err)
 	}
-	got, err := s.Projects(ctx)
-	if err != nil || len(got) != 2 || got[1] != "A renamed" {
-		t.Fatalf("projects = %v, err = %v", got, err)
+	if got := entriesOn(t, s, day, day.AddDate(0, 0, 1)); len(got) != 0 {
+		t.Fatalf("entry at the end bound was included: %v", got)
+	}
+	if got := entriesOn(t, s, day.AddDate(0, 0, 1), day.AddDate(0, 0, 2)); len(got) != 1 {
+		t.Fatalf("entry at the start bound was excluded: %v", got)
+	}
+}
+
+// Several processes starting at once on an empty database must not race on
+// creating tables, and later runs must find nothing left to do.
+func TestMigrationsAreConcurrentSafeAndIdempotent(t *testing.T) {
+	dsn := testdb.DSN(t)
+	for round := range 2 {
+		var wg sync.WaitGroup
+		errs := make(chan error, 4)
+		for range 4 {
+			wg.Go(func() {
+				s, err := Open(context.Background(), dsn)
+				if err == nil {
+					err = s.Close()
+				}
+				errs <- err
+			})
+		}
+		wg.Wait()
+		close(errs)
+		for err := range errs {
+			if err != nil {
+				t.Fatalf("round %d: %v", round, err)
+			}
+		}
 	}
 }

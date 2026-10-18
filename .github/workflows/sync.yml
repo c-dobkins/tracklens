@@ -8,17 +8,23 @@ on:
   workflow_dispatch:
 permissions:
   contents: read
+concurrency:
+  group: sync
+
 jobs:
   sync:
     if: ${{ vars.ENABLE_SYNC == 'true' || github.event_name == 'workflow_dispatch' }}
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
-      - name: sync last 14 days
+      - name: sync the last 14 days
         env:
           TOGGL_API_TOKEN: ${{ secrets.TOGGL_API_TOKEN }}
           TRACKLENS_DATABASE_URL: ${{ secrets.TRACKLENS_DATABASE_URL }}
-        run: go run ./cmd/tracklens -days 14 -sync -v -format json > /dev/null
+        run: go run ./cmd/tracklens -days 14 -sync -format json > /dev/null

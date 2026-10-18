@@ -1,17 +1,19 @@
 package report
 
 import (
+	"cmp"
 	"fmt"
 	"io"
-	"sort"
+	"math"
+	"slices"
+	"strconv"
 	"strings"
-	"text/tabwriter"
 	"time"
 
 	"github.com/c-dobkins/p1/internal/toggl"
 )
 
-// CompareRow is one project's hours in the current and previous window.
+// CompareRow is one project's time in the current and previous window.
 type CompareRow struct {
 	Project  string
 	Current  time.Duration
@@ -21,76 +23,97 @@ type CompareRow struct {
 // Delta is current minus previous.
 func (r CompareRow) Delta() time.Duration { return r.Current - r.Previous }
 
-// Compare splits entries at cutoff (by start time) and totals each side per
-// project: [cutoff, now] is "current", anything earlier is "previous". Rows are
-// ordered by the size of the change so the biggest movers come first.
-func Compare(entries []toggl.Entry, names map[int64]string, now, cutoff time.Time) []CompareRow {
+// Comparison is a per-project comparison, biggest change first.
+type Comparison []CompareRow
+
+// Compare splits entries at cutoff by start time: entries starting at or after
+// cutoff are "current", earlier ones "previous".
+func Compare(entries []toggl.Entry, names map[int64]string, now, cutoff time.Time) Comparison {
 	byProject := map[string]*CompareRow{}
 	for _, e := range entries {
-		d := time.Duration(e.Duration) * time.Second
-		if e.Duration < 0 {
-			d = now.Sub(e.Start)
-		}
 		name := projectName(e, names)
-		r := byProject[name]
-		if r == nil {
+		r, ok := byProject[name]
+		if !ok {
 			r = &CompareRow{Project: name}
 			byProject[name] = r
 		}
 		if e.Start.Before(cutoff) {
-			r.Previous += d
+			r.Previous += e.Elapsed(now)
 		} else {
-			r.Current += d
+			r.Current += e.Elapsed(now)
 		}
 	}
-	rows := make([]CompareRow, 0, len(byProject))
+	rows := make(Comparison, 0, len(byProject))
 	for _, r := range byProject {
 		rows = append(rows, *r)
 	}
-	sort.Slice(rows, func(i, j int) bool {
-		ai, aj := abs(rows[i].Delta()), abs(rows[j].Delta())
-		if ai != aj {
-			return ai > aj
-		}
-		return rows[i].Project < rows[j].Project
+	slices.SortFunc(rows, func(a, b CompareRow) int {
+		return cmp.Or(cmp.Compare(b.Delta().Abs(), a.Delta().Abs()), strings.Compare(a.Project, b.Project))
 	})
 	return rows
 }
 
-func abs(d time.Duration) time.Duration {
-	if d < 0 {
-		return -d
+func (c Comparison) total() CompareRow {
+	t := CompareRow{Project: "TOTAL"}
+	for _, r := range c {
+		t.Current += r.Current
+		t.Previous += r.Previous
 	}
-	return d
+	return t
 }
 
-// WriteCompare renders the comparison table with a total row.
-func WriteCompare(w io.Writer, rows []CompareRow) error {
-	var b strings.Builder
-	tw := tabwriter.NewWriter(&b, 0, 0, 2, ' ', 0)
-	_, _ = fmt.Fprintln(tw, "PROJECT\tTHIS\tPREVIOUS\tCHANGE\tCHANGE %")
-	var total CompareRow
-	total.Project = "TOTAL"
-	for _, r := range rows {
-		writeCompareRow(tw, r)
-		total.Current += r.Current
-		total.Previous += r.Previous
+// WriteTable renders the comparison with a total row.
+func (c Comparison) WriteTable(w io.Writer) error {
+	t := newTable("PROJECT", "THIS", "PREVIOUS", "CHANGE", "CHANGE %")
+	row := func(r CompareRow) {
+		pct := "-"
+		if p, ok := changePercent(r.Current, r.Previous); ok {
+			pct = fmt.Sprintf("%+.0f%%", math.Round(p)) // half away from zero, matching JSON/CSV
+		} else if r.Current > 0 {
+			pct = "new"
+		}
+		t.row(r.Project, fmtHours(r.Current), fmtHours(r.Previous), fmt.Sprintf("%+.2f", roundHours(r.Delta())), pct)
 	}
-	writeCompareRow(tw, total)
-	if err := tw.Flush(); err != nil {
-		return err
+	for _, r := range c {
+		row(r)
 	}
-	_, err := io.WriteString(w, b.String())
-	return err
+	row(c.total())
+	return t.flush(w, "")
 }
 
-func writeCompareRow(w io.Writer, r CompareRow) {
-	pct := "new"
-	switch {
-	case r.Previous > 0:
-		pct = fmt.Sprintf("%+.0f%%", 100*float64(r.Delta())/float64(r.Previous))
-	case r.Current == 0:
-		pct = "-"
+// WriteJSON renders the comparison; change_percent is null when there is no
+// previous time to compare against.
+func (c Comparison) WriteJSON(w io.Writer) error {
+	type row struct {
+		Project  string   `json:"project"`
+		Current  float64  `json:"current_hours"`
+		Previous float64  `json:"previous_hours"`
+		Change   float64  `json:"change_hours"`
+		Percent  *float64 `json:"change_percent"`
 	}
-	_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%+.2f\t%s\n", r.Project, hours(r.Current), hours(r.Previous), r.Delta().Hours(), pct)
+	out := make([]row, 0, len(c))
+	for _, r := range c {
+		x := row{r.Project, roundHours(r.Current), roundHours(r.Previous), roundHours(r.Delta()), nil}
+		if p, ok := changePercent(r.Current, r.Previous); ok {
+			x.Percent = &p
+		}
+		out = append(out, x)
+	}
+	return writeJSON(w, struct {
+		Rows []row `json:"rows"`
+	}{out})
+}
+
+// WriteCSV renders the comparison; change_percent is empty when there is no
+// previous time.
+func (c Comparison) WriteCSV(w io.Writer) error {
+	rows := make([][]string, 0, len(c))
+	for _, r := range c {
+		pct := ""
+		if p, ok := changePercent(r.Current, r.Previous); ok {
+			pct = strconv.FormatFloat(p, 'f', 1, 64)
+		}
+		rows = append(rows, []string{r.Project, fmtHours(r.Current), fmtHours(r.Previous), fmtHours(r.Delta()), pct})
+	}
+	return writeCSV(w, []string{"project", "current_hours", "previous_hours", "change_hours", "change_percent"}, rows)
 }

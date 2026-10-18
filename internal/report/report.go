@@ -1,31 +1,37 @@
-// Package report turns raw time entries into a summary plus data-quality findings.
+// Package report turns raw time entries into summaries, comparisons and
+// data-quality findings, and renders them as tables, JSON or CSV.
 package report
 
 import (
+	"cmp"
 	"fmt"
 	"io"
-	"sort"
+	"math"
+	"slices"
 	"strings"
-	"text/tabwriter"
 	"time"
 
 	"github.com/c-dobkins/p1/internal/toggl"
 )
 
-type Row struct {
-	Project  string
-	Total    time.Duration
-	Billable time.Duration
-}
-
-type Summary struct {
-	Rows     []Row
-	Total    time.Duration
-	Billable time.Duration
-	Findings []string
-}
-
 const noProject = "(no project)"
+
+// Kind classifies a Finding.
+type Kind string
+
+// Kinds of data-quality finding.
+const (
+	KindRunning   Kind = "running"
+	KindNoProject Kind = "no_project"
+	KindOverlap   Kind = "overlap"
+)
+
+// Finding is one data-quality issue.
+type Finding struct {
+	Kind     Kind    `json:"kind"`
+	EntryIDs []int64 `json:"entry_ids"`
+	Message  string  `json:"message"`
+}
 
 // Options tunes the data-quality checks.
 type Options struct {
@@ -34,26 +40,38 @@ type Options struct {
 	OverlapTolerance time.Duration
 }
 
-// Summarize groups entries by project. now is used to size running timers.
-func Summarize(entries []toggl.Entry, names map[int64]string, now time.Time, opts Options) Summary {
-	byProject := map[string]*Row{}
-	var s Summary
-	var closed []toggl.Entry
+// Row is one project's totals.
+type Row struct {
+	Project  string
+	Total    time.Duration
+	Billable time.Duration
+}
 
+// Summary is time per project plus the findings for the same entries.
+type Summary struct {
+	Rows     []Row
+	Total    time.Duration
+	Billable time.Duration
+	Findings []Finding
+}
+
+// Summarize groups entries by project, largest first. now sizes running timers.
+func Summarize(entries []toggl.Entry, names map[int64]string, now time.Time, opts Options) Summary {
+	var s Summary
+	byProject := map[string]*Row{}
 	for _, e := range entries {
-		d := time.Duration(e.Duration) * time.Second
-		if e.Duration < 0 { // running timer
-			d = now.Sub(e.Start)
-			s.Findings = append(s.Findings, fmt.Sprintf("entry %d is still running (%s so far)", e.ID, d.Round(time.Minute)))
-		} else {
-			closed = append(closed, e)
+		d := e.Elapsed(now)
+		if e.Running() {
+			s.Findings = append(s.Findings, Finding{KindRunning, []int64{e.ID},
+				fmt.Sprintf("entry %d is still running (%s so far)", e.ID, d.Round(time.Minute))})
+		}
+		if e.ProjectID == nil {
+			s.Findings = append(s.Findings, Finding{KindNoProject, []int64{e.ID},
+				fmt.Sprintf("entry %d %q has no project", e.ID, e.Description)})
 		}
 		name := projectName(e, names)
-		if e.ProjectID == nil {
-			s.Findings = append(s.Findings, fmt.Sprintf("entry %d %q has no project", e.ID, e.Description))
-		}
-		r := byProject[name]
-		if r == nil {
+		r, ok := byProject[name]
+		if !ok {
 			r = &Row{Project: name}
 			byProject[name] = r
 		}
@@ -64,37 +82,48 @@ func Summarize(entries []toggl.Entry, names map[int64]string, now time.Time, opt
 			s.Billable += d
 		}
 	}
-
 	for _, r := range byProject {
 		s.Rows = append(s.Rows, *r)
 	}
-	sort.Slice(s.Rows, func(i, j int) bool { return s.Rows[i].Total > s.Rows[j].Total })
-	s.Findings = append(s.Findings, overlaps(closed, opts.OverlapTolerance)...)
+	slices.SortFunc(s.Rows, func(a, b Row) int {
+		return cmp.Or(cmp.Compare(b.Total, a.Total), strings.Compare(a.Project, b.Project))
+	})
+	s.Findings = append(s.Findings, overlaps(entries, opts.OverlapTolerance)...)
 	return s
 }
 
-// overlaps reports entries that start before the latest-ending earlier entry
-// has finished. Tracking the furthest end seen so far (rather than just the
-// previous entry) also catches one long entry that swallows several short ones.
-func overlaps(es []toggl.Entry, tolerance time.Duration) []string {
-	sorted := append([]toggl.Entry(nil), es...)
-	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Start.Before(sorted[j].Start) })
-
-	var out []string
-	var latest *toggl.Entry // entry with the furthest end so far
-	for i := range sorted {
-		cur := &sorted[i]
-		if cur.Stop == nil {
-			continue
+// overlaps reports stopped entries that start before the furthest-ending
+// earlier entry has finished. Tracking the furthest end (rather than only the
+// previous entry) also catches one long entry that covers several short ones.
+// Running timers are left out: their end is not known yet.
+func overlaps(entries []toggl.Entry, tolerance time.Duration) []Finding {
+	var stopped []toggl.Entry
+	for _, e := range entries {
+		if !e.Running() {
+			stopped = append(stopped, e)
 		}
+	}
+	slices.SortFunc(stopped, func(a, b toggl.Entry) int {
+		return cmp.Or(a.Start.Compare(b.Start), cmp.Compare(a.ID, b.ID))
+	})
+
+	var noClock time.Time // stopped entries do not depend on the current time
+	var out []Finding
+	var latest *toggl.Entry
+	for i := range stopped {
+		cur := &stopped[i]
 		if latest != nil {
-			if by := latest.Stop.Sub(cur.Start); by > tolerance {
-				out = append(out, fmt.Sprintf("entries %d and %d overlap by %s", latest.ID, cur.ID, by.Round(time.Second)))
+			latestEnd := latest.End(noClock)
+			// An entry wholly inside the earlier one overlaps by its own length.
+			if by := min(latestEnd.Sub(cur.Start), cur.Elapsed(noClock)); by > tolerance {
+				out = append(out, Finding{KindOverlap, []int64{latest.ID, cur.ID},
+					fmt.Sprintf("entries %d and %d overlap by %s", latest.ID, cur.ID, by.Round(time.Second))})
+			}
+			if !cur.End(noClock).After(latestEnd) {
+				continue
 			}
 		}
-		if latest == nil || cur.Stop.After(*latest.Stop) {
-			latest = cur
-		}
+		latest = cur
 	}
 	return out
 }
@@ -106,111 +135,64 @@ func projectName(e toggl.Entry, names map[int64]string) string {
 	if n, ok := names[*e.ProjectID]; ok {
 		return n
 	}
+	if e.ProjectName != "" {
+		return e.ProjectName
+	}
 	return fmt.Sprintf("project %d", *e.ProjectID)
 }
 
-func hours(d time.Duration) string { return fmt.Sprintf("%.2f", d.Hours()) }
-
-// Write renders the table and any findings. Output is built in memory first
-// so a failing writer is reported once, as an error.
-func (s Summary) Write(w io.Writer) error {
-	var b strings.Builder
-	tw := tabwriter.NewWriter(&b, 0, 0, 2, ' ', 0)
-	_, _ = fmt.Fprintln(tw, "PROJECT\tHOURS\tBILLABLE\tBILLABLE %")
-	for _, r := range s.Rows {
-		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", r.Project, hours(r.Total), hours(r.Billable), pct(r.Billable, r.Total))
-	}
-	_, _ = fmt.Fprintf(tw, "TOTAL\t%s\t%s\t%s\n", hours(s.Total), hours(s.Billable), pct(s.Billable, s.Total))
-	if err := tw.Flush(); err != nil {
-		return err
-	}
-	if len(s.Findings) > 0 {
-		b.WriteString("\nChecks:\n")
-		for _, f := range s.Findings {
-			b.WriteString(" - " + f + "\n")
-		}
-	}
-	_, err := io.WriteString(w, b.String())
-	return err
-}
-
-func pct(a, b time.Duration) string {
-	if b == 0 {
+func percentOf(part, whole time.Duration) string {
+	if whole <= 0 {
 		return "-"
 	}
-	return fmt.Sprintf("%.0f%%", 100*float64(a)/float64(b))
+	return fmt.Sprintf("%.0f%%", math.Round(100*float64(part)/float64(whole)))
 }
 
-// DayRow is total and billable time for one UTC calendar day.
-type DayRow struct {
-	Day      string
-	Total    time.Duration
-	Billable time.Duration
-}
+// WriteTable renders the table followed by any findings.
+func (s Summary) WriteTable(w io.Writer) error {
+	t := newTable("PROJECT", "HOURS", "BILLABLE", "BILLABLE %")
+	for _, r := range s.Rows {
+		t.row(r.Project, fmtHours(r.Total), fmtHours(r.Billable), percentOf(r.Billable, r.Total))
+	}
+	t.row("TOTAL", fmtHours(s.Total), fmtHours(s.Billable), percentOf(s.Billable, s.Total))
 
-// ByDay groups time by calendar day in loc, oldest first. An entry that
-// crosses midnight is split so each day gets the time actually worked on it.
-func ByDay(entries []toggl.Entry, now time.Time, loc *time.Location) []DayRow {
-	days := map[string]*DayRow{}
-	for _, e := range entries {
-		end := e.Start.Add(time.Duration(e.Duration) * time.Second)
-		if e.Duration < 0 {
-			end = now
-		}
-		for _, seg := range splitDays(e.Start, end, loc) {
-			r := days[seg.day]
-			if r == nil {
-				r = &DayRow{Day: seg.day}
-				days[seg.day] = r
-			}
-			r.Total += seg.d
-			if e.Billable {
-				r.Billable += seg.d
-			}
+	var extra strings.Builder
+	if len(s.Findings) > 0 {
+		extra.WriteString("\nChecks:\n")
+		for _, f := range s.Findings {
+			extra.WriteString(" - " + f.Message + "\n")
 		}
 	}
-	out := make([]DayRow, 0, len(days))
-	for _, r := range days {
-		out = append(out, *r)
-	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Day < out[j].Day })
-	return out
+	return t.flush(w, extra.String())
 }
 
-type segment struct {
-	day string
-	d   time.Duration
+// WriteJSON renders the summary and findings as JSON.
+func (s Summary) WriteJSON(w io.Writer) error {
+	type row struct {
+		Project  string  `json:"project"`
+		Hours    float64 `json:"hours"`
+		Billable float64 `json:"billable_hours"`
+	}
+	out := struct {
+		Rows     []row     `json:"rows"`
+		Hours    float64   `json:"total_hours"`
+		Billable float64   `json:"billable_hours"`
+		Findings []Finding `json:"findings"`
+	}{Rows: []row{}, Hours: roundHours(s.Total), Billable: roundHours(s.Billable), Findings: s.Findings}
+	if out.Findings == nil {
+		out.Findings = []Finding{}
+	}
+	for _, r := range s.Rows {
+		out.Rows = append(out.Rows, row{r.Project, roundHours(r.Total), roundHours(r.Billable)})
+	}
+	return writeJSON(w, out)
 }
 
-// splitDays cuts [start, end) at each local midnight in loc. Midnights are
-// computed from the calendar, so 23- and 25-hour DST days come out right.
-func splitDays(start, end time.Time, loc *time.Location) []segment {
-	if !end.After(start) {
-		return []segment{{start.In(loc).Format("2006-01-02"), 0}}
+// WriteCSV renders one row per project; findings are not included.
+func (s Summary) WriteCSV(w io.Writer) error {
+	rows := make([][]string, 0, len(s.Rows))
+	for _, r := range s.Rows {
+		rows = append(rows, []string{r.Project, fmtHours(r.Total), fmtHours(r.Billable)})
 	}
-	var out []segment
-	for cur := start.In(loc); cur.Before(end); {
-		y, m, d := cur.Date()
-		next := time.Date(y, m, d+1, 0, 0, 0, 0, loc)
-		if next.After(end) {
-			next = end
-		}
-		out = append(out, segment{cur.Format("2006-01-02"), next.Sub(cur)})
-		cur = next.In(loc)
-	}
-	return out
-}
-
-func WriteDays(w io.Writer, rows []DayRow) error {
-	var b strings.Builder
-	tw := tabwriter.NewWriter(&b, 0, 0, 2, ' ', 0)
-	_, _ = fmt.Fprintln(tw, "DAY\tHOURS\tBILLABLE")
-	for _, r := range rows {
-		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\n", r.Day, hours(r.Total), hours(r.Billable))
-	}
-	if err := tw.Flush(); err != nil {
-		return err
-	}
-	_, err := io.WriteString(w, b.String())
-	return err
+	return writeCSV(w, []string{"project", "hours", "billable_hours"}, rows)
 }

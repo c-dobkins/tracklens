@@ -1,0 +1,5 @@
+project,current_hours,previous_hours,change_hours,change_percent
+Internal tooling,1.00,3.00,-2.00,-66.7
+Client portal,3.25,2.00,1.25,62.5
+Side workspace,1.00,0.00,1.00,
+(no project),0.50,0.00,0.50,

@@ -1,171 +1,147 @@
 package main
 
 import (
+	"bytes"
 	"context"
-	"encoding/csv"
-	"encoding/json"
-	"errors"
-	"log/slog"
+	"flag"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 )
 
-func base() config {
-	return config{days: 7, format: "table", by: "project", tz: time.UTC, file: "../../testdata/sample.json"}
+var update = flag.Bool("update", false, "rewrite golden files")
+
+const sample = "../../testdata/sample.json"
+
+// mapEnv is an env backed by a map, so tests never see the real environment.
+func mapEnv(m map[string]string) env { return func(k string) string { return m[k] } }
+
+// runCLI runs the command and returns exit code, stdout and stderr.
+func runCLI(t *testing.T, vars map[string]string, args ...string) (int, string, string) {
+	t.Helper()
+	var stdout, stderr bytes.Buffer
+	code := run(context.Background(), args, mapEnv(vars), &stdout, &stderr)
+	return code, stdout.String(), stderr.String()
 }
 
-func TestValidate(t *testing.T) {
-	cases := []struct {
-		name string
-		mod  func(*config)
-		want string
-	}{
-		{"bad by", func(c *config) { c.by = "week" }, "-by"},
-		{"bad format", func(c *config) { c.format = "xml" }, "-format"},
-		{"sync without db", func(c *config) { c.sync = true; c.file = "" }, "-db"},
-		{"sync and history", func(c *config) { c.sync, c.history, c.dsn = true, true, "x" }, "mutually exclusive"},
-		{"sync with file", func(c *config) { c.sync, c.dsn = true, "x" }, "live API"},
+func TestGolden(t *testing.T) {
+	views := map[string][]string{
+		"project": nil,
+		"day":     {"-by", "day"},
+		"compare": {"-compare"},
 	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			c := base()
-			tc.mod(&c)
-			err := c.validate()
-			if err == nil || !strings.Contains(err.Error(), tc.want) {
-				t.Fatalf("err = %v, want containing %q", err, tc.want)
-			}
-		})
-	}
-}
-
-func TestRunFixture(t *testing.T) {
-	var out strings.Builder
-	if err := run(context.Background(), base(), &out); err != nil {
-		t.Fatal(err)
-	}
-	for _, want := range []string{"Client portal", "TOTAL", "overlap by 15m0s"} {
-		if !strings.Contains(out.String(), want) {
-			t.Errorf("missing %q in:\n%s", want, out.String())
-		}
-	}
-}
-
-func TestStrictFailsOnFindings(t *testing.T) {
-	c := base()
-	c.strict = true
-	var out strings.Builder
-	if err := run(context.Background(), c, &out); !errors.Is(err, errFindings) {
-		t.Fatalf("err = %v, want errFindings", err)
-	}
-}
-
-func TestMissingTokenIsExplained(t *testing.T) {
-	t.Setenv("TOGGL_API_TOKEN", "")
-	c := base()
-	c.file = ""
-	err := run(context.Background(), c, &strings.Builder{})
-	if err == nil || !strings.Contains(err.Error(), "TOGGL_API_TOKEN") {
-		t.Fatalf("err = %v", err)
-	}
-}
-
-func TestValidateRejectsBadCombos(t *testing.T) {
-	for name, mod := range map[string]func(*config){
-		"zero days":        func(c *config) { c.days = 0 },
-		"compare with day": func(c *config) { c.compare, c.by = true, "day" },
-	} {
-		c := base()
-		mod(&c)
-		if err := c.validate(); err == nil {
-			t.Errorf("%s: want error", name)
-		}
-	}
-}
-
-func TestFixtureHonoursWindow(t *testing.T) {
-	var out strings.Builder
-	if err := run(context.Background(), base(), &out); err != nil {
-		t.Fatal(err)
-	}
-	// Entries 90/91 are from the previous week and must not be counted.
-	if !strings.Contains(out.String(), "5.75") {
-		t.Fatalf("window not applied:\n%s", out.String())
-	}
-}
-
-func TestCompareFixture(t *testing.T) {
-	c := base()
-	c.compare = true
-	var out strings.Builder
-	if err := run(context.Background(), c, &out); err != nil {
-		t.Fatal(err)
-	}
-	for _, want := range []string{"THIS", "PREVIOUS", "Client portal", "Internal tooling"} {
-		if !strings.Contains(out.String(), want) {
-			t.Errorf("missing %q:\n%s", want, out.String())
-		}
-	}
-}
-
-func TestOverlapToleranceFlag(t *testing.T) {
-	c := base()
-	c.overlap = 20 * time.Minute
-	var out strings.Builder
-	if err := run(context.Background(), c, &out); err != nil {
-		t.Fatal(err)
-	}
-	if strings.Contains(out.String(), "overlap") {
-		t.Fatalf("15m overlap should be tolerated:\n%s", out.String())
-	}
-}
-
-func TestAllViewsInAllFormats(t *testing.T) {
-	views := map[string]func(*config){
-		"project": func(c *config) {},
-		"day":     func(c *config) { c.by = "day" },
-		"compare": func(c *config) { c.compare = true },
-	}
-	for view, setView := range views {
+	for view, extra := range views {
 		for _, format := range []string{"table", "json", "csv"} {
-			t.Run(view+"/"+format, func(t *testing.T) {
-				c := base()
-				setView(&c)
-				c.format = format
-				var out strings.Builder
-				if err := run(context.Background(), c, &out); err != nil {
-					t.Fatal(err)
+			name := view + "." + format
+			t.Run(name, func(t *testing.T) {
+				args := append([]string{"-file", sample, "-format", format}, extra...)
+				code, out, errOut := runCLI(t, nil, args...)
+				if code != exitOK {
+					t.Fatalf("exit %d: %s", code, errOut)
 				}
-				got := out.String()
-				switch format {
-				case "json":
-					var v any
-					if err := json.Unmarshal([]byte(got), &v); err != nil {
-						t.Fatalf("invalid JSON: %v\n%s", err, got)
+				path := filepath.Join("testdata", name+".golden")
+				if *update {
+					if err := os.WriteFile(path, []byte(out), 0o600); err != nil {
+						t.Fatal(err)
 					}
-				case "csv":
-					recs, err := csv.NewReader(strings.NewReader(got)).ReadAll()
-					if err != nil || len(recs) < 2 {
-						t.Fatalf("invalid CSV (%v):\n%s", err, got)
-					}
-				default:
-					if got == "" {
-						t.Fatal("empty table")
-					}
+				}
+				want, err := os.ReadFile(path)
+				if err != nil {
+					t.Fatalf("%v (run go test -update to create it)", err)
+				}
+				if out != string(want) {
+					t.Errorf("output differs from %s:\n--- got\n%s--- want\n%s", path, out, want)
 				}
 			})
 		}
 	}
 }
 
-func TestVerboseLogsToLogger(t *testing.T) {
-	var logs strings.Builder
-	c := base()
-	c.log = slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
-	if err := run(context.Background(), c, &strings.Builder{}); err != nil {
+func TestUsageErrors(t *testing.T) {
+	cases := map[string][]string{
+		"unknown flag":       {"-nope"},
+		"stray argument":     {"extra"},
+		"bad format":         {"-format", "xml"},
+		"bad by":             {"-by", "week"},
+		"bad tz":             {"-tz", "Mars/Olympus"},
+		"zero days":          {"-days", "0"},
+		"negative tolerance": {"-overlap-tolerance", "-1m"},
+		"zero timeout":       {"-timeout", "0s"},
+		"compare by day":     {"-compare", "-by", "day"},
+		"sync and history":   {"-sync", "-history", "-db", "x"},
+		"sync with file":     {"-sync", "-db", "x", "-file", sample},
+		"history no db":      {"-history"},
+		"sync with project":  {"-sync", "-db", "x", "-project", "a"},
+	}
+	for name, args := range cases {
+		t.Run(name, func(t *testing.T) {
+			code, out, errOut := runCLI(t, nil, args...)
+			if code != exitUsage || out != "" || errOut == "" {
+				t.Fatalf("exit %d, stdout %q, stderr %q", code, out, errOut)
+			}
+		})
+	}
+}
+
+func TestHelpAndVersion(t *testing.T) {
+	if code, _, errOut := runCLI(t, nil, "-h"); code != exitOK || !strings.Contains(errOut, "Exit status") {
+		t.Fatalf("help: exit %d\n%s", code, errOut)
+	}
+	if code, out, _ := runCLI(t, nil, "-version"); code != exitOK || out != "tracklens dev\n" {
+		t.Fatalf("version: exit %d %q", code, out)
+	}
+}
+
+func TestStrictExitCode(t *testing.T) {
+	code, out, _ := runCLI(t, nil, "-file", sample, "-strict")
+	if code != exitFindings || !strings.Contains(out, "Checks:") {
+		t.Fatalf("exit %d\n%s", code, out)
+	}
+	// Findings only exist in the project view, so -strict is quiet elsewhere.
+	if code, _, _ := runCLI(t, nil, "-file", sample, "-strict", "-by", "day"); code != exitOK {
+		t.Fatalf("by day: exit %d", code)
+	}
+}
+
+func TestOverlapTolerance(t *testing.T) {
+	_, out, _ := runCLI(t, nil, "-file", sample, "-overlap-tolerance", "20m")
+	if strings.Contains(out, "overlap") {
+		t.Fatalf("15m overlap should be tolerated:\n%s", out)
+	}
+}
+
+func TestProjectFilter(t *testing.T) {
+	_, out, _ := runCLI(t, nil, "-file", sample, "-project", "PORTAL")
+	if !strings.Contains(out, "Client portal") || strings.Contains(out, "Internal tooling") || strings.Contains(out, "(no project)") {
+		t.Fatalf("filter not applied:\n%s", out)
+	}
+}
+
+func TestMissingTokenIsExplained(t *testing.T) {
+	code, _, errOut := runCLI(t, nil)
+	if code != exitError || !strings.Contains(errOut, "TOGGL_API_TOKEN") {
+		t.Fatalf("exit %d: %s", code, errOut)
+	}
+}
+
+func TestBadFixtureIsAnError(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "bad.json")
+	if err := os.WriteFile(path, []byte("{"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(logs.String(), "kind=file") || !strings.Contains(logs.String(), "entries=") {
-		t.Fatalf("logs:\n%s", logs.String())
+	if code, _, errOut := runCLI(t, nil, "-file", path); code != exitError || !strings.Contains(errOut, "bad.json") {
+		t.Fatalf("exit %d: %s", code, errOut)
+	}
+	if code, _, _ := runCLI(t, nil, "-file", filepath.Join(t.TempDir(), "missing.json")); code != exitError {
+		t.Fatalf("missing file: exit %d", code)
+	}
+}
+
+func TestVerboseLogging(t *testing.T) {
+	_, _, quiet := runCLI(t, nil, "-file", sample)
+	_, _, loud := runCLI(t, nil, "-file", sample, "-v")
+	if quiet != "" || !strings.Contains(loud, "kind=file") {
+		t.Fatalf("quiet %q, verbose %q", quiet, loud)
 	}
 }

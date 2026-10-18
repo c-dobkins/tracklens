@@ -1,0 +1,32 @@
+{
+  "rows": [
+    {
+      "project": "Internal tooling",
+      "current_hours": 1,
+      "previous_hours": 3,
+      "change_hours": -2,
+      "change_percent": -66.7
+    },
+    {
+      "project": "Client portal",
+      "current_hours": 3.25,
+      "previous_hours": 2,
+      "change_hours": 1.25,
+      "change_percent": 62.5
+    },
+    {
+      "project": "Side workspace",
+      "current_hours": 1,
+      "previous_hours": 0,
+      "change_hours": 1,
+      "change_percent": null
+    },
+    {
+      "project": "(no project)",
+      "current_hours": 0.5,
+      "previous_hours": 0,
+      "change_hours": 0.5,
+      "change_percent": null
+    }
+  ]
+}

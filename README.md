@@ -1,14 +1,17 @@
 # tracklens
 
-A small Go CLI that summarises [Toggl Track](https://toggl.com/track/) time entries by project and flags data-quality problems: entries with no project, timers left running, and overlapping entries.
+[![ci](https://github.com/c-dobkins/p1/actions/workflows/ci.yml/badge.svg)](https://github.com/c-dobkins/p1/actions/workflows/ci.yml)
 
-Built as a portfolio piece for a Toggl application. Toggl's engineering stack is Go and PostgreSQL, with public APIs, so this uses Go with only the standard library.
+A Go command-line tool that reports on [Toggl Track](https://toggl.com/track/) time entries and flags data-quality problems: entries with no project, timers left running, and overlapping entries. It can keep a history in PostgreSQL.
+
+I built it as a portfolio piece for a Toggl application, using the same stack Toggl lists for its backend: Go and PostgreSQL behind a public API.
 
 ```
-$ go run ./cmd/tracklens -file testdata/sample.json
+$ tracklens -file testdata/sample.json
 PROJECT           HOURS  BILLABLE  BILLABLE %
-Client portal     4.25   4.25      100%
+Client portal     3.25   3.25      100%
 Internal tooling  1.00   0.00      0%
+Side workspace    1.00   1.00      100%
 (no project)      0.50   0.00      0%
 TOTAL             5.75   4.25      74%
 
@@ -18,72 +21,95 @@ Checks:
  - entries 101 and 102 overlap by 15m0s
 ```
 
+## Install
+
+```
+go install github.com/c-dobkins/p1/cmd/tracklens@latest
+```
+
+Or download a binary from the [releases page](https://github.com/c-dobkins/p1/releases), or use the container image `ghcr.io/c-dobkins/p1`.
+
 ## Usage
 
 ```
-export TOGGL_API_TOKEN=...                   # from your Toggl profile page
-tracklens -days 14                           # live data
-tracklens -file testdata/sample.json         # offline sample
-tracklens -file testdata/sample.json -by day -tz Europe/Tallinn   # daily totals in a time zone
-tracklens -file testdata/sample.json -format json                 # or csv
-tracklens -days 7 -compare                   # this week vs the week before, biggest movers first
-tracklens -overlap-tolerance 2m              # ignore overlaps of up to 2 minutes
-tracklens -days 7 -compare -format csv       # every view supports table, json and csv
-tracklens -days 14 -by day -format json -v   # -v logs progress to stderr
-tracklens -days 14 -strict                   # exit 2 if any check fires (for CI/cron)
+export TOGGL_API_TOKEN=...                       # from your Toggl profile page
+tracklens -days 14                               # per project, last 14 days
+tracklens -by day -tz Europe/Tallinn             # per day in your time zone
+tracklens -compare                               # last 7 days vs the 7 before, biggest change first
+tracklens -project portal                        # only projects whose name contains "portal"
+tracklens -format json                           # or csv; every view supports table, json and csv
+tracklens -overlap-tolerance 2m                  # ignore overlaps of up to 2 minutes
+tracklens -strict                                # exit 3 if any check fires (for cron/CI)
+tracklens -v                                     # log progress to stderr
+tracklens -h                                     # all flags
 ```
+
+`-file` reads a saved `/me/time_entries?meta=true` response instead of calling the API. An optional `now` field pins the clock so output is reproducible; see [testdata/sample.json](testdata/sample.json).
+
+Exit status: 0 success, 1 error, 2 bad usage, 3 findings with `-strict`.
 
 ### History in PostgreSQL
 
-The API only returns a window of recent entries. `-sync` stores what it fetched; `-history` reports from the database with no API call.
+The API only covers recent entries. `-sync` stores the fetched window, and `-history` reports from the database without calling the API.
 
 ```
-export TRACKLENS_DATABASE_URL='postgres://user:pass@localhost/tracklens?sslmode=disable'
-tracklens -days 30 -sync       # upsert entries and projects (safe to repeat)
+export TRACKLENS_DATABASE_URL='postgres://user:pass@localhost/tracklens?sslmode=verify-full'
+tracklens -days 30 -sync       # make the stored window match Toggl
 tracklens -days 90 -history    # report from stored data
 ```
 
-Schema migrations are embedded in the binary and applied on connect, under an advisory lock so concurrent runs are safe. Entries are upserted by Toggl id, so a timer that was running at the last sync is corrected once it stops.
+A sync is one transaction. It upserts entries by Toggl id, so a timer that was running at the last sync is corrected once it stops. It also deletes stored entries in the window that Toggl no longer returns, so entries deleted in Toggl disappear from the history too. Migrations are embedded in the binary and applied on connect under an advisory lock, so several processes can start at once safely.
 
-### Scheduled sync
+`.github/workflows/sync.yml` runs a daily sync. It stays off until you set the repository variable `ENABLE_SYNC=true` and add the secrets `TOGGL_API_TOKEN` and `TRACKLENS_DATABASE_URL`.
 
-`.github/workflows/sync.yml` runs a daily `-sync` of the last 14 days. It is off until you set the repository variable `ENABLE_SYNC=true` and add the secrets `TOGGL_API_TOKEN` and `TRACKLENS_DATABASE_URL`; it can also be run by hand from the Actions tab.
+## How it talks to the API
 
-### Releases
+- It uses `GET /me/time_entries` with RFC3339 `start_date`/`end_date` and `meta=true`. Project names come back on each entry, so projects in every workspace are named without extra calls.
+- The endpoint returns at most 1000 entries per call. A full response is treated as possibly truncated: the window is halved and fetched again until every part is complete, and entries on a split point are de-duplicated.
+- 429, 5xx and network errors are retried up to four times with exponential backoff and jitter. A `Retry-After` header is used as-is when present. 401, 402 and 403 are not retried, and the error message says what to check.
+- Requests send a `User-Agent` with the version. Response bodies are size-limited, and error bodies are included in messages.
 
-Pushing a tag such as `v0.1.0` runs `release.yml`: it tests, builds binaries for Linux, macOS and Windows (amd64 and arm64 where applicable) with a `SHA256SUMS` file, creates a GitHub release, and pushes an image to `ghcr.io/c-dobkins/p1`.
+## Design
 
-### Docker
+| Package | Role |
+|---|---|
+| `internal/toggl` | API client: auth, retries, window splitting, `Entry` helpers (`Elapsed`, `End`, `Running`) |
+| `internal/report` | Pure functions from entries to `Summary`, `Days` and `Comparison`. Each implements `Renderer` (table, JSON, CSV), so the CLI picks a view and a format independently. |
+| `internal/store` | PostgreSQL persistence with embedded SQL migrations and set-based upserts (`unnest`) |
+| `cmd/tracklens` | Flag parsing and wiring. `run(ctx, args, env, stdout, stderr) int` keeps `main` trivial and the CLI testable. |
 
-```
-make docker
-docker run --rm -e TOGGL_API_TOKEN tracklens:dev -days 7
-```
+Report details:
+- Days are split at local midnight in `-tz`, so an entry crossing midnight counts on both days, and 23- and 25-hour DST days are handled.
+- The overlap check sorts entries by start and tracks the furthest end seen so far. One long entry covering several short ones reports each overlap, by the overlapping length.
+- Output is deterministic: ties are ordered by name or id. Hours are rounded to two decimals in every format. `change_percent` is null (JSON) or empty (CSV) for a project with no earlier time.
 
 ## Development
 
 ```
-make test     # go test -race ./...  (set TEST_DATABASE_URL to include the Postgres tests)
-make lint     # golangci-lint
-make cover
+make test     # go test -race -shuffle=on ./...  (set TEST_DATABASE_URL for the PostgreSQL tests)
+make lint     # golangci-lint v2 with modernize, revive, gocritic, gosec and more
+make fuzz     # fuzz the day splitter
+make golden   # rewrite the CLI golden files after an intended output change
 make vuln     # govulncheck
 ```
 
-CI runs gofmt, vet, tests with a Postgres service container, golangci-lint, govulncheck and a Docker build. Dependabot keeps Go modules, Actions and the base image current. See [SECURITY.md](SECURITY.md) for how secrets are handled.
+Tests:
+- The CLI is covered by golden files for every view and format, plus tests for usage errors, exit codes and an end-to-end sync against a fake API and a real database.
+- PostgreSQL tests run in a throwaway schema each, so packages can run in parallel.
 
-## Layout
+CI on every pull request:
+- Tests against PostgreSQL 16 and 18, with a short fuzz run.
+- golangci-lint, govulncheck, CodeQL and actionlint.
+- A Docker build with a smoke test.
 
-- `internal/toggl`: API v9 client with basic auth, context support and retry/backoff on 429 and 5xx (honours `Retry-After`).
-- `internal/store`: PostgreSQL persistence, embedded migrations.
-- `internal/report`: pure aggregation and checks, easy to unit test.
-- `cmd/tracklens`: the CLI; `$TOGGL_API_URL` overrides the API base for tests.
+All actions are pinned by commit SHA and kept current by Dependabot. Tagging `vX.Y.Z` builds binaries for Linux, macOS and Windows with checksums and signed build provenance, and pushes a multi-tag image with SBOM and provenance to GHCR.
 
-## Status and limits
+## Limits
 
-- Verified against an `httptest` fake and a real local PostgreSQL 16, not the live Toggl API. The endpoint paths are from memory of the v9 docs, so check them first.
-- There is no pagination because the time-entries endpoint is queried by date range.
-- Entries that cross midnight are split across days in the `-tz` zone, including 23- and 25-hour DST days.
-- Overlap detection tracks the furthest-ending earlier entry, so one long entry covering several short ones is caught.
-- `-compare` works on entry start time. Every view supports `-format table|json|csv`; JSON and CSV round hours to two decimals, and `change_percent` is null (JSON) or empty (CSV) for a project with no earlier time.
-- The release and sync workflows have not run yet. The release build script was run locally for all five targets, and all workflows pass actionlint with shellcheck.
-- Next: a `-project` filter, a weekly Slack/email digest, and a small HTTP mode that serves the same reports.
+- I haven't run it against the live Toggl API with a real token. The client follows the v9 docs and is tested against a fake server, so the first real run is the remaining check.
+- Window boundaries go to the API as RFC3339 instants. Whether the API treats `end_date` as inclusive doesn't matter, because results are de-duplicated and filtered by start time.
+- The comparison assigns each entry to a period by its start time and doesn't split entries that cross the boundary.
+
+## License
+
+[MIT](LICENSE)
