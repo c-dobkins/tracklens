@@ -24,7 +24,9 @@ Checks:
 export TOGGL_API_TOKEN=...        # from your Toggl profile page
 go run ./cmd/tracklens -days 14   # live data
 go run ./cmd/tracklens -file testdata/sample.json
-go test ./...
+go run ./cmd/tracklens -file testdata/sample.json -by day        # daily totals
+go run ./cmd/tracklens -file testdata/sample.json -format json   # or csv
+go test -race ./...
 ```
 
 ## Layout
@@ -36,5 +38,6 @@ go test ./...
 ## Status and limits
 
 - Tests use an `httptest` server and a fixture. I haven't run it against the live API, and the endpoint paths are from memory of the v9 docs, so check them first.
-- No pagination or retry/backoff yet; a 429 is reported, not retried.
-- Possible next steps: weekly/daily breakdown, CSV/JSON output, a Postgres store for history.
+- Requests retry with exponential backoff on 429 and 5xx, honouring `Retry-After`. There is no pagination because the time-entries endpoint is queried by date range.
+- CI runs gofmt, vet and `go test -race` on every push.
+- Possible next steps: a Postgres store for history, week-over-week comparison, configurable overlap tolerance.

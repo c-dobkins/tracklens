@@ -21,15 +21,20 @@ type fixture struct {
 func main() {
 	days := flag.Int("days", 7, "number of days to look back")
 	file := flag.String("file", "", "read entries from a JSON fixture instead of the API")
+	format := flag.String("format", "table", "output format: table, json or csv")
+	by := flag.String("by", "project", "grouping: project or day")
 	flag.Parse()
 
-	if err := run(*days, *file); err != nil {
+	if err := run(*days, *file, *format, *by); err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		os.Exit(1)
 	}
 }
 
-func run(days int, file string) error {
+func run(days int, file, format, by string) error {
+	if by != "project" && by != "day" {
+		return fmt.Errorf("unknown -by %q (want project or day)", by)
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
 	now := time.Now().UTC()
@@ -66,6 +71,20 @@ func run(days int, file string) error {
 		}
 	}
 
-	report.Summarize(entries, names, now).Write(os.Stdout)
+	if by == "day" {
+		report.WriteDays(os.Stdout, report.ByDay(entries, now))
+		return nil
+	}
+	s := report.Summarize(entries, names, now)
+	switch format {
+	case "table":
+		s.Write(os.Stdout)
+	case "json":
+		return s.WriteJSON(os.Stdout)
+	case "csv":
+		return s.WriteCSV(os.Stdout)
+	default:
+		return fmt.Errorf("unknown -format %q (want table, json or csv)", format)
+	}
 	return nil
 }

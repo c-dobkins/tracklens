@@ -36,3 +36,27 @@ func TestSummarize(t *testing.T) {
 		}
 	}
 }
+
+func TestByDay(t *testing.T) {
+	d1 := time.Date(2026, 10, 14, 9, 0, 0, 0, time.UTC)
+	d2 := d1.AddDate(0, 0, 1)
+	rows := ByDay([]toggl.Entry{
+		{Start: d2, Duration: 1800, Billable: true},
+		{Start: d1, Duration: 3600},
+		{Start: d1.Add(time.Hour), Duration: 600},
+	}, d2)
+	if len(rows) != 2 || rows[0].Day != "2026-10-14" || rows[0].Total != 70*time.Minute || rows[1].Billable != 30*time.Minute {
+		t.Fatalf("rows = %+v", rows)
+	}
+}
+
+func TestWriteJSONAndCSV(t *testing.T) {
+	s := Summarize([]toggl.Entry{{ID: 1, ProjectID: ptr(int64(1)), Billable: true, Start: ts(9, 0), Duration: 3600}}, map[int64]string{1: "Portal"}, ts(12, 0))
+	var j, c strings.Builder
+	if err := s.WriteJSON(&j); err != nil || !strings.Contains(j.String(), `"project": "Portal"`) || !strings.Contains(j.String(), `"findings": []`) {
+		t.Fatalf("json: %v\n%s", err, j.String())
+	}
+	if err := s.WriteCSV(&c); err != nil || c.String() != "project,hours,billable_hours\nPortal,1.00,1.00\n" {
+		t.Fatalf("csv: %v\n%q", err, c.String())
+	}
+}

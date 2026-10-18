@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"strconv"
 	"time"
 )
 
@@ -32,34 +33,64 @@ type Client struct {
 	BaseURL string
 	Token   string
 	HTTP    *http.Client
+
+	backoff time.Duration // base delay between retries
 }
 
 func New(token string) *Client {
-	return &Client{BaseURL: DefaultBaseURL, Token: token, HTTP: &http.Client{Timeout: 30 * time.Second}}
+	return &Client{BaseURL: DefaultBaseURL, Token: token, HTTP: &http.Client{Timeout: 30 * time.Second}, backoff: time.Second}
 }
 
+const maxAttempts = 4
+
+// get retries on 429 and 5xx, honouring Retry-After when present.
 func (c *Client) get(ctx context.Context, path string, q url.Values, out any) error {
 	u := c.BaseURL + path
 	if len(q) > 0 {
 		u += "?" + q.Encode()
 	}
+	var lastErr error
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		wait, err := c.try(ctx, u, path, out)
+		if err == nil {
+			return nil
+		}
+		if wait < 0 { // not retryable
+			return err
+		}
+		lastErr = err
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(wait << attempt):
+		}
+	}
+	return lastErr
+}
+
+// try performs one request. A negative wait means the error is final.
+func (c *Client) try(ctx context.Context, u, path string, out any) (time.Duration, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	if err != nil {
-		return err
+		return -1, err
 	}
 	req.SetBasicAuth(c.Token, "api_token")
 	resp, err := c.HTTP.Do(req)
 	if err != nil {
-		return err
+		return c.backoff, err
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode == http.StatusTooManyRequests {
-		return fmt.Errorf("toggl: rate limited, retry after %ss", resp.Header.Get("Retry-After"))
+	switch {
+	case resp.StatusCode == http.StatusOK:
+		return -1, json.NewDecoder(resp.Body).Decode(out)
+	case resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500:
+		wait := c.backoff
+		if s, err := strconv.Atoi(resp.Header.Get("Retry-After")); err == nil {
+			wait = time.Duration(s) * time.Second
+		}
+		return wait, fmt.Errorf("toggl: GET %s: %s", path, resp.Status)
 	}
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("toggl: GET %s: %s", path, resp.Status)
-	}
-	return json.NewDecoder(resp.Body).Decode(out)
+	return -1, fmt.Errorf("toggl: GET %s: %s", path, resp.Status)
 }
 
 // Entries returns time entries in [start, end).

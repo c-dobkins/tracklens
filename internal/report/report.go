@@ -109,3 +109,46 @@ func pct(a, b time.Duration) string {
 	}
 	return fmt.Sprintf("%.0f%%", 100*float64(a)/float64(b))
 }
+
+// DayRow is total and billable time for one UTC calendar day.
+type DayRow struct {
+	Day      string
+	Total    time.Duration
+	Billable time.Duration
+}
+
+// ByDay groups entries by the UTC day they started on, oldest first.
+func ByDay(entries []toggl.Entry, now time.Time) []DayRow {
+	days := map[string]*DayRow{}
+	for _, e := range entries {
+		d := time.Duration(e.Duration) * time.Second
+		if e.Duration < 0 {
+			d = now.Sub(e.Start)
+		}
+		k := e.Start.UTC().Format("2006-01-02")
+		r := days[k]
+		if r == nil {
+			r = &DayRow{Day: k}
+			days[k] = r
+		}
+		r.Total += d
+		if e.Billable {
+			r.Billable += d
+		}
+	}
+	out := make([]DayRow, 0, len(days))
+	for _, r := range days {
+		out = append(out, *r)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Day < out[j].Day })
+	return out
+}
+
+func WriteDays(w io.Writer, rows []DayRow) {
+	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(tw, "DAY\tHOURS\tBILLABLE")
+	for _, r := range rows {
+		fmt.Fprintf(tw, "%s\t%s\t%s\n", r.Day, hours(r.Total), hours(r.Billable))
+	}
+	tw.Flush()
+}

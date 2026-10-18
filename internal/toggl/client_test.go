@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -35,5 +36,41 @@ func TestEntriesAuthAndDecode(t *testing.T) {
 	c.Token = "bad"
 	if _, err := c.Entries(context.Background(), time.Now(), time.Now()); err == nil {
 		t.Fatal("expected auth error")
+	}
+}
+
+func TestRetriesOnRateLimit(t *testing.T) {
+	var calls int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if atomic.AddInt32(&calls, 1) < 3 {
+			w.WriteHeader(http.StatusTooManyRequests)
+			return
+		}
+		w.Write([]byte(`[]`))
+	}))
+	defer srv.Close()
+
+	c := New("tok")
+	c.BaseURL, c.backoff = srv.URL, time.Millisecond
+	if _, err := c.Entries(context.Background(), time.Now(), time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if calls != 3 {
+		t.Fatalf("calls = %d, want 3", calls)
+	}
+}
+
+func TestNoRetryOnClientError(t *testing.T) {
+	var calls int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&calls, 1)
+		w.WriteHeader(http.StatusForbidden)
+	}))
+	defer srv.Close()
+
+	c := New("bad")
+	c.BaseURL, c.backoff = srv.URL, time.Millisecond
+	if _, err := c.Entries(context.Background(), time.Now(), time.Now()); err == nil || calls != 1 {
+		t.Fatalf("err = %v, calls = %d", err, calls)
 	}
 }
