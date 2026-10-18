@@ -25,6 +25,11 @@ const DefaultBaseURL = "https://api.track.toggl.com/api/v9"
 // response. A response of exactly this size may have been truncated.
 const MaxEntriesPerRequest = 1000
 
+// ClockSkew is how far past the local clock a query window should reach, so
+// an entry whose start is slightly ahead (a device clock running fast) is not
+// missed. It widens windows only; reports still measure against the real now.
+const ClockSkew = 5 * time.Minute
+
 const (
 	maxAttempts  = 4
 	maxBodyBytes = 64 << 20 // refuse to decode absurdly large responses

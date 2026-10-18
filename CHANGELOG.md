@@ -13,6 +13,7 @@ Nothing has been tagged yet. These are the changes since the first version on `m
 - `store.Sync` replaces `SaveEntries`/`SaveProjects`.
 
 ### Added
+- `-serve` provides a read-only HTTP API (`/v1/summary`, `/v1/days`, `/v1/compare`, `/healthz`) over the PostgreSQL history or a fixture, in JSON or CSV, with graceful shutdown.
 - `-prune`, used with `-sync`, deletes stored entries in the window that Toggl no longer returns.
 - `-project` filters by project name, case-insensitively.
 - `-timeout` sets the overall time limit (default 2m).
@@ -22,6 +23,7 @@ Nothing has been tagged yet. These are the changes since the first version on `m
 - Releases carry signed build provenance, an SBOM and semver image tags.
 
 ### Fixed
+- `-compare` now splits an entry that crosses from one period into the other, instead of counting all of it in the period where it started.
 - Projects outside the default workspace were shown as "project 123". Names now come from `meta=true`.
 - Responses at the API's 1000-entry cap were silently truncated. The window is now split until every part is complete.
 - `Retry-After` was multiplied by the backoff. It is now used as-is and capped, and a wait longer than a minute, or past the deadline, returns the error immediately.

@@ -63,6 +63,33 @@ A sync is one transaction. It upserts entries by Toggl id, so a timer that was r
 
 `.github/workflows/sync.yml` runs a daily sync (without `-prune`). It stays off until you set the repository variable `ENABLE_SYNC=true` and add the secrets `TOGGL_API_TOKEN` and `TRACKLENS_DATABASE_URL`.
 
+## HTTP API
+
+`-serve` exposes the same reports as a small read-only JSON/CSV API, either over the PostgreSQL history or over a fixture:
+
+```
+tracklens -serve :8080 -history                        # needs -db / TRACKLENS_DATABASE_URL
+tracklens -serve :8080 -file testdata/sample.json      # no database needed
+curl 'localhost:8080/v1/summary?days=14&project=portal'
+curl 'localhost:8080/v1/days?tz=Europe/Tallinn&format=csv'
+curl 'localhost:8080/v1/compare?days=7'
+curl 'localhost:8080/healthz'
+```
+
+| Parameter | Endpoints | Meaning |
+|---|---|---|
+| `days` | all | window length, 1 to 366 (default 7) |
+| `project` | all | case-insensitive project-name filter |
+| `format` | all | `json` (default) or `csv` |
+| `tz` | `/v1/days` | IANA time zone for day boundaries |
+| `overlap_tolerance` | `/v1/summary` | e.g. `2m` |
+
+- Bad parameters get a `400` with `{"error": "..."}`.
+- An unavailable data source gets a `503` that doesn't reveal internal details. The cause is logged instead.
+- `/healthz` pings the database.
+- The server has read, write and idle timeouts, logs every request with its status and duration, and shuts down gracefully on SIGINT/SIGTERM, letting in-flight requests finish.
+- It has no authentication, so bind it to localhost or put it behind a proxy that adds auth.
+
 ## How it talks to the API
 
 - It uses `GET /me/time_entries` with RFC3339 `start_date`/`end_date` and `meta=true`. Project names come back on each entry, so projects in every workspace are named without extra calls.
@@ -78,11 +105,13 @@ A sync is one transaction. It upserts entries by Toggl id, so a timer that was r
 | `internal/toggl` | API client: auth, retries, window splitting, `Entry` helpers (`Elapsed`, `End`, `Running`) |
 | `internal/report` | Pure functions from entries to `Summary`, `Days` and `Comparison`. Each implements `Renderer` (table, JSON, CSV), so the CLI picks a view and a format independently. |
 | `internal/store` | PostgreSQL persistence with embedded SQL migrations and set-based upserts (`unnest`) |
+| `internal/server` | Read-only HTTP API over any `Source` (the store, or a fixture) using the Go 1.22+ method-and-path router |
 | `cmd/tracklens` | Flag parsing and wiring. `run(ctx, args, env, stdout, stderr) int` keeps `main` trivial and the CLI testable. |
 
 Report details:
 - Days are split at local midnight in `-tz`, so an entry crossing midnight counts on both days, and 23- and 25-hour DST days are handled.
 - The overlap check sorts entries by start and tracks the furthest end seen so far. One long entry covering several short ones reports each overlap, by the overlapping length.
+- The comparison splits an entry that crosses from one period into the other, so each period gets the time actually worked in it.
 - Output is deterministic: ties are ordered by name or id. Hours are rounded to two decimals in every format. `change_percent` is null (JSON) or empty (CSV) for a project with no earlier time.
 
 ## Development
@@ -110,7 +139,6 @@ All actions are pinned by commit SHA and kept current by Dependabot. Tagging `vX
 
 - I haven't run it against the live Toggl API with a real token. The client follows the v9 docs and is tested against a fake server, so the first real run is the remaining check.
 - Window boundaries go to the API as RFC3339 instants. Whether the API treats `end_date` as inclusive doesn't matter, because results are de-duplicated and filtered by start time.
-- The comparison assigns each entry to a period by its start time and doesn't split entries that cross the boundary.
 
 ## License
 

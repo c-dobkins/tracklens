@@ -45,6 +45,9 @@ func Open(ctx context.Context, dsn string) (*Store, error) {
 	return s, nil
 }
 
+// Ping checks that the database is reachable.
+func (s *Store) Ping(ctx context.Context) error { return s.db.PingContext(ctx) }
+
 // Close releases the connection pool.
 func (s *Store) Close() error { return s.db.Close() }
 

@@ -14,4 +14,5 @@ LABEL org.opencontainers.image.source="https://github.com/c-dobkins/p1" \
       org.opencontainers.image.licenses="MIT"
 COPY --from=build /out/tracklens /tracklens
 USER nonroot:nonroot
+EXPOSE 8080
 ENTRYPOINT ["/tracklens"]

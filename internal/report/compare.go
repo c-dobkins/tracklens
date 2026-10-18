@@ -26,8 +26,9 @@ func (r CompareRow) Delta() time.Duration { return r.Current - r.Previous }
 // Comparison is a per-project comparison, biggest change first.
 type Comparison []CompareRow
 
-// Compare splits entries at cutoff by start time: entries starting at or after
-// cutoff are "current", earlier ones "previous".
+// Compare totals each project's time before and after cutoff. An entry that
+// spans cutoff is split there, so each period gets the time actually worked
+// in it.
 func Compare(entries []toggl.Entry, names map[int64]string, now, cutoff time.Time) Comparison {
 	byProject := map[string]*CompareRow{}
 	for _, e := range entries {
@@ -37,10 +38,15 @@ func Compare(entries []toggl.Entry, names map[int64]string, now, cutoff time.Tim
 			r = &CompareRow{Project: name}
 			byProject[name] = r
 		}
-		if e.Start.Before(cutoff) {
+		start, end := e.Start, e.End(now)
+		switch {
+		case !end.After(cutoff):
 			r.Previous += e.Elapsed(now)
-		} else {
+		case !start.Before(cutoff):
 			r.Current += e.Elapsed(now)
+		default:
+			r.Previous += cutoff.Sub(start)
+			r.Current += end.Sub(cutoff)
 		}
 	}
 	rows := make(Comparison, 0, len(byProject))

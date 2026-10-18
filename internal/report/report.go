@@ -196,3 +196,19 @@ func (s Summary) WriteCSV(w io.Writer) error {
 	}
 	return writeCSV(w, []string{"project", "hours", "billable_hours"}, rows)
 }
+
+// FilterProject keeps entries whose project name contains pattern, ignoring
+// case. Entries without a project never match.
+func FilterProject(es []toggl.Entry, names map[int64]string, pattern string) []toggl.Entry {
+	pattern = strings.ToLower(pattern)
+	var out []toggl.Entry
+	for _, e := range es {
+		if e.ProjectID == nil {
+			continue
+		}
+		if strings.Contains(strings.ToLower(projectName(e, names)), pattern) {
+			out = append(out, e)
+		}
+	}
+	return out
+}

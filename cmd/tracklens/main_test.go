@@ -74,6 +74,8 @@ func TestUsageErrors(t *testing.T) {
 		"history no db":      {"-history"},
 		"sync with project":  {"-sync", "-db", "x", "-project", "a"},
 		"prune without sync": {"-prune", "-db", "x"},
+		"serve with sync":    {"-serve", ":0", "-sync", "-db", "x"},
+		"serve without data": {"-serve", ":0"},
 	}
 	for name, args := range cases {
 		t.Run(name, func(t *testing.T) {

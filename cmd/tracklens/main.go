@@ -11,14 +11,16 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
+	"net/http"
 	"os"
 	"os/signal"
-	"strings"
 	"syscall"
 	"time"
 	_ "time/tzdata" // so -tz works in minimal containers
 
 	"github.com/c-dobkins/p1/internal/report"
+	"github.com/c-dobkins/p1/internal/server"
 	"github.com/c-dobkins/p1/internal/store"
 	"github.com/c-dobkins/p1/internal/toggl"
 )
@@ -47,6 +49,8 @@ Examples:
   tracklens -days 30 -sync                # store in PostgreSQL (needs -db)
   tracklens -days 30 -sync -prune         # ...and drop entries deleted in Toggl
   tracklens -days 90 -history             # report from PostgreSQL
+  tracklens -serve :8080 -history         # JSON/CSV API over PostgreSQL
+  tracklens -serve :8080 -file testdata/sample.json
 
 Environment:
   TOGGL_API_TOKEN          API token from your Toggl profile page
@@ -75,6 +79,7 @@ type config struct {
 	overlap time.Duration
 	project string
 	timeout time.Duration
+	serve   string
 	verbose bool
 	version bool
 }
@@ -108,6 +113,14 @@ func run(ctx context.Context, args []string, getenv env, stdout, stderr io.Write
 		level = slog.LevelDebug
 	}
 	log := slog.New(slog.NewTextHandler(stderr, &slog.HandlerOptions{Level: level}))
+
+	if c.serve != "" {
+		if err := runServer(ctx, c, log); err != nil {
+			_, _ = fmt.Fprintf(stderr, "tracklens: %v\n", err)
+			return exitError
+		}
+		return exitOK
+	}
 
 	ctx, cancel := context.WithTimeout(ctx, c.timeout)
 	defer cancel()
@@ -144,7 +157,8 @@ func parseFlags(args []string, getenv env, stderr io.Writer) (config, error) {
 	fs.BoolVar(&c.compare, "compare", false, "compare the last -days with the -days before, by project")
 	fs.DurationVar(&c.overlap, "overlap-tolerance", 0, "ignore overlaps up to this long, e.g. 2m")
 	fs.StringVar(&c.project, "project", "", "only entries whose project name contains this text (case-insensitive)")
-	fs.DurationVar(&c.timeout, "timeout", 2*time.Minute, "give up after this long")
+	fs.DurationVar(&c.timeout, "timeout", 2*time.Minute, "give up after this long (not used with -serve)")
+	fs.StringVar(&c.serve, "serve", "", "serve the reports over HTTP on this address, e.g. :8080 (needs -history or -file)")
 	fs.BoolVar(&c.verbose, "v", false, "log progress to stderr")
 	fs.BoolVar(&c.version, "version", false, "print the version and exit")
 	if err := fs.Parse(args); err != nil {
@@ -191,6 +205,10 @@ func (c config) validate() error {
 		return errors.New("-sync and -history need -db or $TRACKLENS_DATABASE_URL")
 	case c.sync && c.project != "":
 		return errors.New("-sync stores the whole window; drop -project")
+	case c.serve != "" && c.sync:
+		return errors.New("-serve is read-only; run -sync separately")
+	case c.serve != "" && !c.history && c.file == "":
+		return errors.New("-serve needs -history (with -db) or -file")
 	}
 	return nil
 }
@@ -202,7 +220,7 @@ func runReport(ctx context.Context, c config, getenv env, log *slog.Logger, out 
 		return err
 	}
 	if c.project != "" {
-		d.entries = filterProject(d.entries, d.names, c.project)
+		d.entries = report.FilterProject(d.entries, d.names, c.project)
 		log.Debug("filtered", "project", c.project, "entries", len(d.entries))
 	}
 
@@ -221,10 +239,6 @@ func runReport(ctx context.Context, c config, getenv env, log *slog.Logger, out 
 	}
 	return nil
 }
-
-// clockSkew widens the window past now, so an entry whose start is slightly
-// ahead of this machine's clock (a phone running fast) is not missed.
-const clockSkew = 5 * time.Minute
 
 // dataset is the input to every report.
 type dataset struct {
@@ -259,7 +273,7 @@ func load(ctx context.Context, c config, getenv env, log *slog.Logger) (dataset,
 	if c.compare {
 		back *= 2 // the previous period too
 	}
-	from, to := d.now.AddDate(0, 0, -back), d.now.Add(clockSkew)
+	from, to := d.now.AddDate(0, 0, -back), d.now.Add(toggl.ClockSkew)
 	log.Debug("window", "from", from, "to", to)
 
 	var err error
@@ -329,6 +343,76 @@ func syncStore(ctx context.Context, dsn string, from, to time.Time, entries []to
 	return nil
 }
 
+// fixtureSource serves a fixture to the HTTP API.
+type fixtureSource struct{ entries []toggl.Entry }
+
+func (f fixtureSource) Entries(_ context.Context, from, to time.Time) ([]toggl.Entry, error) {
+	return inWindow(f.entries, from, to), nil
+}
+
+func (f fixtureSource) Projects(context.Context) (map[int64]string, error) {
+	return toggl.ProjectNames(f.entries), nil
+}
+
+func (fixtureSource) Ping(context.Context) error { return nil }
+
+// runServer serves the API until ctx is cancelled, then shuts down
+// gracefully, letting in-flight requests finish.
+func runServer(ctx context.Context, c config, log *slog.Logger) error {
+	var src server.Source
+	now := func() time.Time { return time.Now().UTC() }
+	if c.file != "" {
+		f, err := readFixture(c.file)
+		if err != nil {
+			return err
+		}
+		if f.Now != nil {
+			fixed := *f.Now
+			now = func() time.Time { return fixed }
+		}
+		src = fixtureSource{f.Entries}
+	} else {
+		st, err := store.Open(ctx, c.dsn)
+		if err != nil {
+			return err
+		}
+		defer func() { _ = st.Close() }()
+		src = st
+	}
+
+	srv := &http.Server{
+		Handler:           server.New(src, log, now),
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       10 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       time.Minute,
+		ErrorLog:          slog.NewLogLogger(log.Handler(), slog.LevelWarn),
+	}
+	ln, err := (&net.ListenConfig{}).Listen(ctx, "tcp", c.serve)
+	if err != nil {
+		return err
+	}
+	log.Info("listening", "addr", ln.Addr().String())
+
+	errc := make(chan error, 1)
+	go func() { errc <- srv.Serve(ln) }()
+	select {
+	case err := <-errc:
+		return err
+	case <-ctx.Done():
+	}
+	log.Info("shutting down")
+	shutdownCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+	defer cancel()
+	if err := srv.Shutdown(shutdownCtx); err != nil {
+		return err
+	}
+	if err := <-errc; !errors.Is(err, http.ErrServerClosed) {
+		return err
+	}
+	return nil
+}
+
 func readFixture(path string) (fixture, error) {
 	var f fixture
 	b, err := os.ReadFile(path) //nolint:gosec // reading the file the user named is the point
@@ -348,25 +432,6 @@ func inWindow(es []toggl.Entry, from, to time.Time) []toggl.Entry {
 	var out []toggl.Entry
 	for _, e := range es {
 		if !e.Start.Before(from) && e.Start.Before(to) {
-			out = append(out, e)
-		}
-	}
-	return out
-}
-
-// filterProject keeps entries whose project name contains pattern, ignoring case.
-func filterProject(es []toggl.Entry, names map[int64]string, pattern string) []toggl.Entry {
-	pattern = strings.ToLower(pattern)
-	var out []toggl.Entry
-	for _, e := range es {
-		if e.ProjectID == nil {
-			continue
-		}
-		name := names[*e.ProjectID]
-		if name == "" {
-			name = e.ProjectName
-		}
-		if strings.Contains(strings.ToLower(name), pattern) {
 			out = append(out, e)
 		}
 	}

@@ -343,3 +343,30 @@ func TestPercentRoundedOnce(t *testing.T) {
 		t.Fatalf("table:\n%s\ncsv:\n%s", table.String(), csvOut.String())
 	}
 }
+
+func TestCompareSplitsEntriesAcrossTheCutoff(t *testing.T) {
+	cutoff := at(12, 0)
+	es := []toggl.Entry{
+		entry(1, at(11, 0), 3*time.Hour),         // 1h before, 2h after
+		entry(2, at(9, 0), 3*time.Hour),          // ends exactly at the cutoff
+		{ID: 3, Start: at(11, 30), Duration: -1}, // running across the cutoff
+	}
+	got := Compare(es, nil, at(13, 0), cutoff)
+	want := Comparison{{noProject, 2*time.Hour + time.Hour, time.Hour + 3*time.Hour + 30*time.Minute}}
+	if !slices.Equal(got, want) {
+		t.Fatalf("got %+v, want %+v", got, want)
+	}
+}
+
+func TestFilterProject(t *testing.T) {
+	es := []toggl.Entry{
+		{ID: 1, ProjectID: new(int64(1))},
+		{ID: 2, ProjectID: new(int64(2)), ProjectName: "Client Portal v2"}, // name only on the entry
+		{ID: 3, ProjectID: new(int64(3))},
+		{ID: 4}, // no project never matches
+	}
+	got := FilterProject(es, map[int64]string{1: "Client portal", 3: "Internal"}, "PORTAL")
+	if len(got) != 2 || got[0].ID != 1 || got[1].ID != 2 {
+		t.Fatalf("got %+v", got)
+	}
+}
