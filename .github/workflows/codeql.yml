@@ -13,9 +13,13 @@ concurrency:
 
 jobs:
   analyze:
+    # Code scanning is free for public repositories; a private one needs
+    # GitHub Advanced Security, so skip there rather than fail.
+    if: ${{ !github.event.repository.private }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
+      actions: read
       contents: read
       security-events: write
     steps:

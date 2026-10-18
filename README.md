@@ -101,7 +101,7 @@ Tests:
 
 CI on every pull request:
 - Tests against PostgreSQL 16 and 18, with a short fuzz run.
-- golangci-lint, govulncheck, CodeQL and actionlint.
+- golangci-lint, govulncheck, CodeQL (once the repository is public; private repositories need GitHub Advanced Security) and actionlint.
 - A Docker build with a smoke test.
 
 All actions are pinned by commit SHA and kept current by Dependabot. Tagging `vX.Y.Z` builds binaries for Linux, macOS and Windows with checksums and signed build provenance, and pushes a multi-tag image with SBOM and provenance to GHCR.
