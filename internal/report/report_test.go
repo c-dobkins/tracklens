@@ -209,7 +209,8 @@ func TestCompare(t *testing.T) {
 		project(entry(3, now.AddDate(0, 0, -2), time.Hour), 2), // new this week
 		entry(4, now.AddDate(0, 0, -10), 5*time.Hour),          // only last week
 	}
-	rows := Compare(es, map[int64]string{1: "A", 2: "B"}, now, now.AddDate(0, 0, -7))
+	from, cutoff := Periods(now, 7)
+	rows := Compare(es, map[int64]string{1: "A", 2: "B"}, now, from, cutoff)
 	want := Comparison{{noProject, 0, 5 * time.Hour}, {"A", 4 * time.Hour, 2 * time.Hour}, {"B", time.Hour, 0}}
 	if !slices.Equal(rows, want) {
 		t.Fatalf("rows = %+v", rows)
@@ -279,7 +280,7 @@ func TestEmptyReportsAreValid(t *testing.T) {
 	for name, r := range map[string]Renderer{
 		"summary": Summarize(nil, nil, at(9, 0), Options{}),
 		"days":    ByDay(nil, at(9, 0), time.UTC),
-		"compare": Compare(nil, nil, at(9, 0), at(8, 0)),
+		"compare": Compare(nil, nil, at(9, 0), at(7, 0), at(8, 0)),
 	} {
 		var j, c bytes.Buffer
 		if err := r.WriteJSON(&j); err != nil || !json.Valid(j.Bytes()) || strings.Contains(j.String(), "null") {
@@ -351,8 +352,16 @@ func TestCompareSplitsEntriesAcrossTheCutoff(t *testing.T) {
 		entry(2, at(9, 0), 3*time.Hour),          // ends exactly at the cutoff
 		{ID: 3, Start: at(11, 30), Duration: -1}, // running across the cutoff
 	}
-	got := Compare(es, nil, at(13, 0), cutoff)
+	got := Compare(es, nil, at(13, 0), at(8, 0), cutoff)
 	want := Comparison{{noProject, 2*time.Hour + time.Hour, time.Hour + 3*time.Hour + 30*time.Minute}}
+	if !slices.Equal(got, want) {
+		t.Fatalf("got %+v, want %+v", got, want)
+	}
+
+	// Time before the previous period is left out at that edge too.
+	early := entry(4, at(7, 0), 2*time.Hour) // 07:00-09:00, previous period starts 08:00
+	got = Compare([]toggl.Entry{early}, nil, at(13, 0), at(8, 0), cutoff)
+	want = Comparison{{noProject, 0, time.Hour}}
 	if !slices.Equal(got, want) {
 		t.Fatalf("got %+v, want %+v", got, want)
 	}
@@ -368,5 +377,24 @@ func TestFilterProject(t *testing.T) {
 	got := FilterProject(es, map[int64]string{1: "Client portal", 3: "Internal"}, "PORTAL")
 	if len(got) != 2 || got[0].ID != 1 || got[1].ID != 2 {
 		t.Fatalf("got %+v", got)
+	}
+	// An unnamed project must not match its placeholder label "project 9".
+	if got := FilterProject([]toggl.Entry{{ID: 5, ProjectID: new(int64(9))}}, nil, "project"); len(got) != 0 {
+		t.Fatalf("placeholder matched: %+v", got)
+	}
+}
+
+func TestWindow(t *testing.T) {
+	now := at(12, 0)
+	from, to := Window(now, 7, false)
+	if !from.Equal(now.AddDate(0, 0, -7)) || !to.Equal(now.Add(toggl.ClockSkew)) {
+		t.Fatalf("report window %v..%v", from, to)
+	}
+	from, _ = Window(now, 7, true)
+	if !from.Equal(now.AddDate(0, 0, -14).Add(-compareMargin)) {
+		t.Fatalf("compare window starts %v", from)
+	}
+	if pFrom, cutoff := Periods(now, 7); !pFrom.Equal(now.AddDate(0, 0, -14)) || !cutoff.Equal(now.AddDate(0, 0, -7)) {
+		t.Fatalf("periods %v %v", pFrom, cutoff)
 	}
 }

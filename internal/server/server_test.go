@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/c-dobkins/p1/internal/report"
 	"github.com/c-dobkins/p1/internal/toggl"
 )
 
@@ -98,8 +99,8 @@ func TestWindowAndFilters(t *testing.T) {
 	if !src.from.Equal(now.AddDate(0, 0, -3)) || !src.to.Equal(now.Add(toggl.ClockSkew)) {
 		t.Fatalf("summary window %v..%v", src.from, src.to)
 	}
-	get(t, src, "/v1/compare?days=3") // needs the previous period too
-	if !src.from.Equal(now.AddDate(0, 0, -6)) {
+	get(t, src, "/v1/compare?days=3") // needs the previous period too, plus a margin
+	if from, _ := report.Window(now, 3, true); !src.from.Equal(from) {
 		t.Fatalf("compare window starts %v", src.from)
 	}
 
@@ -116,10 +117,12 @@ func TestWindowAndFilters(t *testing.T) {
 
 func TestBadParameters(t *testing.T) {
 	for _, q := range []string{
-		"days=0", "days=367", "days=x", "format=xml", "format=table", "tz=Mars/Base", "overlap_tolerance=-1m", "overlap_tolerance=soon",
+		"summary?days=0", "summary?days=367", "summary?days=x", "summary?format=xml", "summary?format=table",
+		"days?tz=Mars/Base", "summary?overlap_tolerance=-1m", "summary?overlap_tolerance=soon",
+		"summary?tz=UTC", "compare?overlap_tolerance=1m", "days?overlap_tolerance=1m", "summary?dayz=3",
 	} {
 		t.Run(q, func(t *testing.T) {
-			rec := get(t, &fakeSource{}, "/v1/summary?"+q)
+			rec := get(t, &fakeSource{}, "/v1/"+q)
 			var body struct {
 				Error string `json:"error"`
 			}
@@ -178,3 +181,22 @@ func TestClientGoneDuringWriteIsLogged(t *testing.T) {
 type brokenWriter struct{ *httptest.ResponseRecorder }
 
 func (brokenWriter) Write([]byte) (int, error) { return 0, io.ErrClosedPipe }
+
+// slowSource blocks until the request's context ends.
+type slowSource struct{ fakeSource }
+
+func (slowSource) Entries(ctx context.Context, _, _ time.Time) ([]toggl.Entry, error) {
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+func TestRequestContextEndsTheQuery(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), 50*time.Millisecond)
+	defer cancel()
+	h := New(&slowSource{}, slog.New(slog.DiscardHandler), func() time.Time { return now })
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequestWithContext(ctx, http.MethodGet, "/v1/summary", http.NoBody))
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status %d", rec.Code)
+	}
+}

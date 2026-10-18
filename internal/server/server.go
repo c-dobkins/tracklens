@@ -5,7 +5,8 @@
 //	GET /v1/compare?days=7&project=                         this period vs the previous one
 //	GET /healthz                                            liveness and data-source check
 //
-// Every report endpoint answers JSON by default and CSV with format=csv.
+// Every report endpoint answers JSON by default and CSV with format=csv. A
+// parameter an endpoint does not use is rejected rather than ignored.
 package server
 
 import (
@@ -15,7 +16,9 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"slices"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/c-dobkins/p1/internal/report"
@@ -24,6 +27,11 @@ import (
 
 // MaxDays bounds the window a single request may ask for.
 const MaxDays = 366
+
+// RequestTimeout bounds the work for one request, below a typical
+// http.Server WriteTimeout so a slow query ends in a 503, not a dropped
+// connection.
+const RequestTimeout = 20 * time.Second
 
 // Source supplies the entries the API reports on.
 type Source interface {
@@ -34,9 +42,10 @@ type Source interface {
 
 // Server handles API requests. Create one with New.
 type Server struct {
-	src Source
-	log *slog.Logger
-	now func() time.Time
+	src   Source
+	log   *slog.Logger
+	now   func() time.Time
+	zones sync.Map // tz name -> *time.Location
 }
 
 // New returns the API handler. now is the report clock, usually time.Now.
@@ -59,8 +68,16 @@ type params struct {
 	overlap time.Duration
 }
 
-func parseParams(r *http.Request) (params, error) {
+// Query parameters every report endpoint accepts.
+var commonParams = []string{"days", "project", "format"}
+
+func (s *Server) parseParams(r *http.Request, extra ...string) (params, error) {
 	q := r.URL.Query()
+	for key := range q {
+		if !slices.Contains(commonParams, key) && !slices.Contains(extra, key) {
+			return params{}, fmt.Errorf("unknown parameter %q for %s", key, r.URL.Path)
+		}
+	}
 	p := params{days: 7, project: q.Get("project"), format: report.FormatJSON, tz: time.UTC}
 	if v := q.Get("days"); v != "" {
 		d, err := strconv.Atoi(v)
@@ -77,7 +94,7 @@ func parseParams(r *http.Request) (params, error) {
 		p.format = f
 	}
 	if v := q.Get("tz"); v != "" {
-		loc, err := time.LoadLocation(v)
+		loc, err := s.location(v)
 		if err != nil {
 			return p, fmt.Errorf("unknown tz %q", v)
 		}
@@ -93,10 +110,24 @@ func parseParams(r *http.Request) (params, error) {
 	return p, nil
 }
 
-// load fetches the entries in the last `back` days, filtered by project.
-func (s *Server) load(ctx context.Context, p params, back int) ([]toggl.Entry, map[int64]string, time.Time, error) {
+// location caches time.LoadLocation, which reads zoneinfo on every call.
+func (s *Server) location(name string) (*time.Location, error) {
+	if loc, ok := s.zones.Load(name); ok {
+		return loc.(*time.Location), nil
+	}
+	loc, err := time.LoadLocation(name)
+	if err != nil {
+		return nil, err
+	}
+	s.zones.Store(name, loc)
+	return loc, nil
+}
+
+// load fetches the entries for the report window, filtered by project.
+func (s *Server) load(ctx context.Context, p params, compare bool) ([]toggl.Entry, map[int64]string, time.Time, error) {
 	now := s.now()
-	entries, err := s.src.Entries(ctx, now.AddDate(0, 0, -back), now.Add(toggl.ClockSkew))
+	from, to := report.Window(now, p.days, compare)
+	entries, err := s.src.Entries(ctx, from, to)
 	if err != nil {
 		return nil, nil, now, err
 	}
@@ -111,34 +142,45 @@ func (s *Server) load(ctx context.Context, p params, back int) ([]toggl.Entry, m
 }
 
 func (s *Server) summary(w http.ResponseWriter, r *http.Request) {
-	s.serve(w, r, 1, func(p params, es []toggl.Entry, names map[int64]string, now time.Time) report.Renderer {
-		return report.Summarize(es, names, now, report.Options{OverlapTolerance: p.overlap})
-	})
+	s.serve(w, r, endpoint{params: []string{"overlap_tolerance"},
+		build: func(p params, es []toggl.Entry, names map[int64]string, now time.Time) report.Renderer {
+			return report.Summarize(es, names, now, report.Options{OverlapTolerance: p.overlap})
+		}})
 }
 
 func (s *Server) days(w http.ResponseWriter, r *http.Request) {
-	s.serve(w, r, 1, func(p params, es []toggl.Entry, _ map[int64]string, now time.Time) report.Renderer {
-		return report.ByDay(es, now, p.tz)
-	})
+	s.serve(w, r, endpoint{params: []string{"tz"},
+		build: func(p params, es []toggl.Entry, _ map[int64]string, now time.Time) report.Renderer {
+			return report.ByDay(es, now, p.tz)
+		}})
 }
 
 func (s *Server) compare(w http.ResponseWriter, r *http.Request) {
-	s.serve(w, r, 2, func(p params, es []toggl.Entry, names map[int64]string, now time.Time) report.Renderer {
-		return report.Compare(es, names, now, now.AddDate(0, 0, -p.days))
-	})
+	s.serve(w, r, endpoint{compare: true,
+		build: func(p params, es []toggl.Entry, names map[int64]string, now time.Time) report.Renderer {
+			from, cutoff := report.Periods(now, p.days)
+			return report.Compare(es, names, now, from, cutoff)
+		}})
 }
 
-// serve parses the request, loads periods*days of data, builds the report
-// and writes it in the requested format.
-func (s *Server) serve(w http.ResponseWriter, r *http.Request, periods int,
-	build func(params, []toggl.Entry, map[int64]string, time.Time) report.Renderer,
-) {
-	p, err := parseParams(r)
+// endpoint describes one report endpoint.
+type endpoint struct {
+	params  []string // accepted in addition to commonParams
+	compare bool     // load the previous period too
+	build   func(params, []toggl.Entry, map[int64]string, time.Time) report.Renderer
+}
+
+// serve parses the request, loads the window, builds the report and writes
+// it in the requested format.
+func (s *Server) serve(w http.ResponseWriter, r *http.Request, e endpoint) {
+	p, err := s.parseParams(r, e.params...)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	entries, names, now, err := s.load(r.Context(), p, p.days*periods)
+	ctx, cancel := context.WithTimeout(r.Context(), RequestTimeout)
+	defer cancel()
+	entries, names, now, err := s.load(ctx, p, e.compare)
 	if err != nil {
 		s.log.ErrorContext(r.Context(), "load entries", "err", err)
 		writeError(w, http.StatusServiceUnavailable, "data source unavailable")
@@ -151,7 +193,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, periods int,
 	}
 	w.Header().Set("Content-Type", contentType)
 	w.Header().Set("Cache-Control", "no-store")
-	if err := report.Render(w, p.format, build(p, entries, names, now)); err != nil {
+	if err := report.Render(w, p.format, e.build(p, entries, names, now)); err != nil {
 		s.log.WarnContext(r.Context(), "write response", "err", err) // the client has most likely gone
 	}
 }

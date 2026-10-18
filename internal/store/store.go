@@ -27,8 +27,19 @@ const migrationLock = 727274
 // Store is a PostgreSQL-backed history of time entries.
 type Store struct{ db *sql.DB }
 
-// Open connects and applies any migrations not yet recorded.
+// Open connects and applies any migrations not yet recorded. Use it where
+// the process writes (sync).
 func Open(ctx context.Context, dsn string) (*Store, error) {
+	return open(ctx, dsn, (*Store).migrate)
+}
+
+// OpenReader connects without changing the schema, so it works with a
+// read-only database role. It fails if migrations are pending.
+func OpenReader(ctx context.Context, dsn string) (*Store, error) {
+	return open(ctx, dsn, (*Store).checkMigrated)
+}
+
+func open(ctx context.Context, dsn string, prepare func(*Store, context.Context) error) (*Store, error) {
 	db, err := sql.Open("pgx", dsn)
 	if err != nil {
 		return nil, err
@@ -38,11 +49,65 @@ func Open(ctx context.Context, dsn string) (*Store, error) {
 		return nil, fmt.Errorf("store: connect: %w", err)
 	}
 	s := &Store{db: db}
-	if err := s.migrate(ctx); err != nil {
+	if err := prepare(s, ctx); err != nil {
 		_ = db.Close()
-		return nil, fmt.Errorf("store: migrate: %w", err)
+		return nil, fmt.Errorf("store: %w", err)
 	}
 	return s, nil
+}
+
+// migrationNames lists the embedded migrations in order, by base name.
+func migrationNames() ([]string, error) {
+	paths, err := fs.Glob(migrations, "migrations/*.sql")
+	if err != nil {
+		return nil, err
+	}
+	slices.Sort(paths)
+	names := make([]string, len(paths))
+	for i, p := range paths {
+		names[i] = path.Base(p) // recorded without the directory, e.g. "001_init.sql"
+	}
+	return names, nil
+}
+
+// checkMigrated fails unless every embedded migration has been applied.
+func (s *Store) checkMigrated(ctx context.Context) error {
+	want, err := migrationNames()
+	if err != nil {
+		return err
+	}
+	var exists bool
+	if err := s.db.QueryRowContext(ctx, `SELECT to_regclass('schema_migrations') IS NOT NULL`).Scan(&exists); err != nil {
+		return err
+	}
+	applied := map[string]bool{}
+	if exists {
+		rows, err := s.db.QueryContext(ctx, `SELECT name FROM schema_migrations`)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var name string
+			if err := rows.Scan(&name); err != nil {
+				return err
+			}
+			applied[name] = true
+		}
+		if err := rows.Err(); err != nil {
+			return err
+		}
+	}
+	var pending []string
+	for _, name := range want {
+		if !applied[name] {
+			pending = append(pending, name)
+		}
+	}
+	if len(pending) > 0 {
+		return fmt.Errorf("database schema is not up to date (pending %v); run tracklens -sync once to migrate it", pending)
+	}
+	return nil
 }
 
 // Ping checks that the database is reachable.
@@ -54,11 +119,10 @@ func (s *Store) Close() error { return s.db.Close() }
 // migrate applies pending migrations in name order inside one transaction,
 // holding an advisory lock so concurrent processes cannot race.
 func (s *Store) migrate(ctx context.Context) error {
-	paths, err := fs.Glob(migrations, "migrations/*.sql")
+	names, err := migrationNames()
 	if err != nil {
 		return err
 	}
-	slices.Sort(paths)
 
 	return s.inTx(ctx, func(tx *sql.Tx) error {
 		if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock($1)`, migrationLock); err != nil {
@@ -68,8 +132,7 @@ func (s *Store) migrate(ctx context.Context) error {
 			name TEXT PRIMARY KEY, applied_at TIMESTAMPTZ NOT NULL DEFAULT now())`); err != nil {
 			return err
 		}
-		for _, p := range paths {
-			name := path.Base(p) // recorded without the directory, e.g. "001_init.sql"
+		for _, name := range names {
 			var done bool
 			if err := tx.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = $1)`, name).Scan(&done); err != nil {
 				return err
@@ -77,7 +140,7 @@ func (s *Store) migrate(ctx context.Context) error {
 			if done {
 				continue
 			}
-			body, err := migrations.ReadFile(p)
+			body, err := migrations.ReadFile("migrations/" + name)
 			if err != nil {
 				return err
 			}

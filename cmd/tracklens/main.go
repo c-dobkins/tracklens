@@ -15,6 +15,8 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"slices"
+	"strings"
 	"syscall"
 	"time"
 	_ "time/tzdata" // so -tz works in minimal containers
@@ -167,6 +169,17 @@ func parseFlags(args []string, getenv env, stderr io.Writer) (config, error) {
 	if fs.NArg() > 0 {
 		return c, fmt.Errorf("unexpected argument %q", fs.Arg(0))
 	}
+	if c.serve != "" {
+		var ignored []string
+		fs.Visit(func(f *flag.Flag) {
+			if slices.Contains(reportFlags, f.Name) {
+				ignored = append(ignored, "-"+f.Name)
+			}
+		})
+		if len(ignored) > 0 {
+			return c, fmt.Errorf("-serve takes report options per request as query parameters; drop %s", strings.Join(ignored, " "))
+		}
+	}
 
 	var err error
 	if c.format, err = report.ParseFormat(format); err != nil {
@@ -184,6 +197,9 @@ func parseFlags(args []string, getenv env, stderr io.Writer) (config, error) {
 	}
 	return c, c.validate()
 }
+
+// reportFlags shape a single report; with -serve they come from each request.
+var reportFlags = []string{"days", "format", "by", "tz", "strict", "compare", "overlap-tolerance", "project", "timeout"}
 
 func (c config) validate() error {
 	switch {
@@ -226,7 +242,8 @@ func runReport(ctx context.Context, c config, getenv env, log *slog.Logger, out 
 
 	switch {
 	case c.compare:
-		return report.Render(out, c.format, report.Compare(d.entries, d.names, d.now, d.now.AddDate(0, 0, -c.days)))
+		from, cutoff := report.Periods(d.now, c.days)
+		return report.Render(out, c.format, report.Compare(d.entries, d.names, d.now, from, cutoff))
 	case c.byDay:
 		return report.Render(out, c.format, report.ByDay(d.entries, d.now, c.tz))
 	}
@@ -247,72 +264,59 @@ type dataset struct {
 	now     time.Time        // sizes running timers and anchors the window
 }
 
-// fixture is a saved /me/time_entries?meta=true response. now pins the clock
-// so output is reproducible; it defaults to the current time.
-type fixture struct {
-	Now     *time.Time    `json:"now"`
-	Entries []toggl.Entry `json:"entries"`
-}
-
-// load reads the window that ends now from a fixture, the database or the
-// API, syncing to the database when asked.
+// load reads the report window from a fixture, the database or the API,
+// syncing to the database when asked.
 func load(ctx context.Context, c config, getenv env, log *slog.Logger) (dataset, error) {
 	d := dataset{now: time.Now().UTC()}
-	var fixed fixture
-	if c.file != "" {
-		var err error
-		if fixed, err = readFixture(c.file); err != nil {
-			return d, err
-		}
-		if fixed.Now != nil {
-			d.now = *fixed.Now
-		}
-	}
-
-	back := c.days
-	if c.compare {
-		back *= 2 // the previous period too
-	}
-	from, to := d.now.AddDate(0, 0, -back), d.now.Add(toggl.ClockSkew)
-	log.Debug("window", "from", from, "to", to)
-
-	var err error
+	var src server.Source
 	switch {
 	case c.file != "":
 		log.Debug("source", "kind", "file", "path", c.file)
-		d.entries = inWindow(fixed.Entries, from, to)
-		d.names = toggl.ProjectNames(d.entries)
-		if len(d.entries) == 0 && len(fixed.Entries) > 0 {
-			log.Warn("no fixture entries fall in the window; set \"now\" in the file or raise -days",
-				"entries", len(fixed.Entries), "from", from.Format(time.RFC3339))
+		f, err := newFixtureSource(c.file)
+		if err != nil {
+			return d, err
 		}
+		if f.now != nil {
+			d.now = *f.now
+		}
+		src = f
 	case c.history:
 		log.Debug("source", "kind", "history")
-		d.entries, d.names, err = loadHistory(ctx, c.dsn, from, to)
-	default:
-		log.Debug("source", "kind", "api")
-		if d.entries, err = loadAPI(ctx, getenv, from, to); err == nil {
-			d.names = toggl.ProjectNames(d.entries)
-			if c.sync {
-				err = syncStore(ctx, c.dsn, from, to, d.entries, store.SyncOptions{Prune: c.prune}, log)
-			}
+		st, err := store.OpenReader(ctx, c.dsn)
+		if err != nil {
+			return d, err
 		}
+		defer func() { _ = st.Close() }()
+		src = st
 	}
-	return d, err
-}
 
-func loadHistory(ctx context.Context, dsn string, from, to time.Time) ([]toggl.Entry, map[int64]string, error) {
-	st, err := store.Open(ctx, dsn)
-	if err != nil {
-		return nil, nil, err
+	from, to := report.Window(d.now, c.days, c.compare)
+	log.Debug("window", "from", from, "to", to)
+
+	if src == nil { // the live API
+		entries, err := loadAPI(ctx, getenv, from, to)
+		if err != nil {
+			return d, err
+		}
+		d.entries, d.names = entries, toggl.ProjectNames(entries)
+		if c.sync {
+			err = syncStore(ctx, c.dsn, from, to, entries, store.SyncOptions{Prune: c.prune}, log)
+		}
+		return d, err
 	}
-	defer func() { _ = st.Close() }()
-	entries, err := st.Entries(ctx, from, to)
-	if err != nil {
-		return nil, nil, err
+
+	var err error
+	if d.entries, err = src.Entries(ctx, from, to); err != nil {
+		return d, err
 	}
-	names, err := st.Projects(ctx)
-	return entries, names, err
+	if d.names, err = src.Projects(ctx); err != nil {
+		return d, err
+	}
+	if f, ok := src.(*fixtureSource); ok && len(d.entries) == 0 && len(f.entries) > 0 {
+		log.Warn("no fixture entries fall in the window; set \"now\" in the file or raise -days",
+			"entries", len(f.entries), "from", from.Format(time.RFC3339))
+	}
+	return d, nil
 }
 
 func loadAPI(ctx context.Context, getenv env, from, to time.Time) ([]toggl.Entry, error) {
@@ -329,7 +333,7 @@ func loadAPI(ctx context.Context, getenv env, from, to time.Time) ([]toggl.Entry
 }
 
 func syncStore(ctx context.Context, dsn string, from, to time.Time, entries []toggl.Entry, opts store.SyncOptions, log *slog.Logger) error {
-	st, err := store.Open(ctx, dsn)
+	st, err := store.Open(ctx, dsn) // a writer: applies pending migrations
 	if err != nil {
 		return err
 	}
@@ -343,18 +347,39 @@ func syncStore(ctx context.Context, dsn string, from, to time.Time, entries []to
 	return nil
 }
 
-// fixtureSource serves a fixture to the HTTP API.
-type fixtureSource struct{ entries []toggl.Entry }
+// fixture is a saved /me/time_entries?meta=true response. now pins the clock
+// so output is reproducible; it defaults to the current time.
+type fixture struct {
+	Now     *time.Time    `json:"now"`
+	Entries []toggl.Entry `json:"entries"`
+}
 
-func (f fixtureSource) Entries(_ context.Context, from, to time.Time) ([]toggl.Entry, error) {
+// fixtureSource serves a fixture through the same interface as the store.
+type fixtureSource struct {
+	entries []toggl.Entry
+	names   map[int64]string // computed once; the file never changes
+	now     *time.Time
+}
+
+func newFixtureSource(path string) (*fixtureSource, error) {
+	f, err := readFixture(path)
+	if err != nil {
+		return nil, err
+	}
+	return &fixtureSource{entries: f.Entries, names: toggl.ProjectNames(f.Entries), now: f.Now}, nil
+}
+
+func (f *fixtureSource) Entries(_ context.Context, from, to time.Time) ([]toggl.Entry, error) {
 	return inWindow(f.entries, from, to), nil
 }
 
-func (f fixtureSource) Projects(context.Context) (map[int64]string, error) {
-	return toggl.ProjectNames(f.entries), nil
-}
+func (f *fixtureSource) Projects(context.Context) (map[int64]string, error) { return f.names, nil }
 
-func (fixtureSource) Ping(context.Context) error { return nil }
+func (*fixtureSource) Ping(context.Context) error { return nil }
+
+// startupTimeout bounds connecting to the database before serving, so an
+// unreachable database fails the start instead of hanging it.
+const startupTimeout = 30 * time.Second
 
 // runServer serves the API until ctx is cancelled, then shuts down
 // gracefully, letting in-flight requests finish.
@@ -362,17 +387,19 @@ func runServer(ctx context.Context, c config, log *slog.Logger) error {
 	var src server.Source
 	now := func() time.Time { return time.Now().UTC() }
 	if c.file != "" {
-		f, err := readFixture(c.file)
+		f, err := newFixtureSource(c.file)
 		if err != nil {
 			return err
 		}
-		if f.Now != nil {
-			fixed := *f.Now
+		if f.now != nil {
+			fixed := *f.now
 			now = func() time.Time { return fixed }
 		}
-		src = fixtureSource{f.Entries}
+		src = f
 	} else {
-		st, err := store.Open(ctx, c.dsn)
+		startCtx, cancel := context.WithTimeout(ctx, startupTimeout)
+		st, err := store.OpenReader(startCtx, c.dsn) // never migrates; works with a read-only role
+		cancel()
 		if err != nil {
 			return err
 		}
@@ -384,7 +411,7 @@ func runServer(ctx context.Context, c config, log *slog.Logger) error {
 		Handler:           server.New(src, log, now),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       10 * time.Second,
-		WriteTimeout:      30 * time.Second,
+		WriteTimeout:      server.RequestTimeout + 10*time.Second,
 		IdleTimeout:       time.Minute,
 		ErrorLog:          slog.NewLogLogger(log.Handler(), slog.LevelWarn),
 	}

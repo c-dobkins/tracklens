@@ -106,7 +106,12 @@ jobs:
         run: docker run --rm -v "$PWD/testdata:/data:ro" tracklens:ci -file /data/sample.json -format csv
       - name: smoke test the HTTP API
         run: |
-          docker run -d --name api -p 8080:8080 -v "$PWD/testdata:/data:ro" tracklens:ci -serve :8080 -file /data/sample.json
-          for _ in $(seq 1 20); do curl -fsS localhost:8080/healthz && break; sleep 0.5; done
+          docker run -d --rm --name api -p 8080:8080 -v "$PWD/testdata:/data:ro" tracklens:ci -serve :8080 -file /data/sample.json
+          trap 'docker logs api; docker stop api >/dev/null' EXIT
+          ready=""
+          for _ in $(seq 1 20); do
+            if curl -fsS localhost:8080/healthz; then ready=1; break; fi
+            sleep 0.5
+          done
+          [ -n "$ready" ] || { echo "API never became healthy" >&2; exit 1; }
           curl -fsS 'localhost:8080/v1/summary?format=csv'
-          docker stop api

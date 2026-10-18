@@ -26,10 +26,12 @@ func (r CompareRow) Delta() time.Duration { return r.Current - r.Previous }
 // Comparison is a per-project comparison, biggest change first.
 type Comparison []CompareRow
 
-// Compare totals each project's time before and after cutoff. An entry that
-// spans cutoff is split there, so each period gets the time actually worked
-// in it.
-func Compare(entries []toggl.Entry, names map[int64]string, now, cutoff time.Time) Comparison {
+// Compare totals each project's time in the previous period [from, cutoff)
+// and the current one, from cutoff on. Entries are clipped to those bounds, so
+// an entry spanning a boundary counts only the time worked inside each period.
+// Pass entries starting up to a day before from (see Window) so time spilling
+// into the previous period is not missed.
+func Compare(entries []toggl.Entry, names map[int64]string, now, from, cutoff time.Time) Comparison {
 	byProject := map[string]*CompareRow{}
 	for _, e := range entries {
 		name := projectName(e, names)
@@ -39,15 +41,8 @@ func Compare(entries []toggl.Entry, names map[int64]string, now, cutoff time.Tim
 			byProject[name] = r
 		}
 		start, end := e.Start, e.End(now)
-		switch {
-		case !end.After(cutoff):
-			r.Previous += e.Elapsed(now)
-		case !start.Before(cutoff):
-			r.Current += e.Elapsed(now)
-		default:
-			r.Previous += cutoff.Sub(start)
-			r.Current += end.Sub(cutoff)
-		}
+		r.Previous += overlap(start, end, from, cutoff)
+		r.Current += overlap(start, end, cutoff, end) // no upper bound: an entry may end slightly after now
 	}
 	rows := make(Comparison, 0, len(byProject))
 	for _, r := range byProject {
@@ -57,6 +52,17 @@ func Compare(entries []toggl.Entry, names map[int64]string, now, cutoff time.Tim
 		return cmp.Or(cmp.Compare(b.Delta().Abs(), a.Delta().Abs()), strings.Compare(a.Project, b.Project))
 	})
 	return rows
+}
+
+// overlap is how much of [start, end) lies inside [lo, hi).
+func overlap(start, end, lo, hi time.Time) time.Duration {
+	if start.Before(lo) {
+		start = lo
+	}
+	if end.After(hi) {
+		end = hi
+	}
+	return max(end.Sub(start), 0)
 }
 
 func (c Comparison) total() CompareRow {

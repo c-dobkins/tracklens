@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -201,4 +202,34 @@ func TestUpgradeAppliesOnlyNewMigrations(t *testing.T) {
 	if !slices.Equal(applied, []string{"001_init.sql", "002_workspace.sql"}) {
 		t.Fatalf("applied = %v", applied)
 	}
+}
+
+func TestOpenReaderNeverMigrates(t *testing.T) {
+	dsn := testdb.DSN(t)
+	if _, err := OpenReader(t.Context(), dsn); err == nil || !strings.Contains(err.Error(), "001_init.sql") {
+		t.Fatalf("empty database: err = %v", err)
+	}
+	db, err := sql.Open("pgx", dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var exists bool
+	if err := db.QueryRowContext(t.Context(), `SELECT to_regclass('time_entries') IS NOT NULL`).Scan(&exists); err != nil || exists {
+		t.Fatalf("reader created tables: %v %v", exists, err)
+	}
+
+	w, err := Open(t.Context(), dsn) // a writer migrates
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = w.Close()
+	r, err := OpenReader(t.Context(), dsn)
+	if err != nil {
+		t.Fatalf("migrated database: %v", err)
+	}
+	if err := r.Ping(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	_ = r.Close()
 }

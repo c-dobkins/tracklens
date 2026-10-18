@@ -84,9 +84,10 @@ curl 'localhost:8080/healthz'
 | `tz` | `/v1/days` | IANA time zone for day boundaries |
 | `overlap_tolerance` | `/v1/summary` | e.g. `2m` |
 
-- Bad parameters get a `400` with `{"error": "..."}`.
+- Bad parameters, and parameters an endpoint doesn't use, get a `400` with `{"error": "..."}`, so a typo is never silently ignored. Report flags such as `-days` are rejected with `-serve`, because each request sets its own.
 - An unavailable data source gets a `503` that doesn't reveal internal details. The cause is logged instead.
-- `/healthz` pings the database.
+- `/healthz` pings the database. Each request has a 20-second deadline, so a slow query ends in a `503` rather than a dropped connection.
+- `-history` and `-serve -history` never change the schema, so they work with a read-only database role. If migrations are pending they stop with a message to run `-sync` once.
 - The server has read, write and idle timeouts, logs every request with its status and duration, and shuts down gracefully on SIGINT/SIGTERM, letting in-flight requests finish.
 - It has no authentication, so bind it to localhost or put it behind a proxy that adds auth.
 
@@ -111,7 +112,7 @@ curl 'localhost:8080/healthz'
 Report details:
 - Days are split at local midnight in `-tz`, so an entry crossing midnight counts on both days, and 23- and 25-hour DST days are handled.
 - The overlap check sorts entries by start and tracks the furthest end seen so far. One long entry covering several short ones reports each overlap, by the overlapping length.
-- The comparison splits an entry that crosses from one period into the other, so each period gets the time actually worked in it.
+- The comparison clips entries to each period, so an entry crossing a period edge counts only the time inside it. A day of extra history is loaded to catch entries running into the previous period.
 - Output is deterministic: ties are ordered by name or id. Hours are rounded to two decimals in every format. `change_percent` is null (JSON) or empty (CSV) for a project with no earlier time.
 
 ## Development
