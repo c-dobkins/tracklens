@@ -1,0 +1,10 @@
+{
+  "projects": [{"id": 1, "name": "Client portal"}, {"id": 2, "name": "Internal tooling"}],
+  "entries": [
+    {"id": 101, "project_id": 1, "description": "API pagination", "billable": true,  "start": "2026-10-15T09:00:00Z", "stop": "2026-10-15T11:30:00Z", "duration": 9000},
+    {"id": 102, "project_id": 1, "description": "Code review",    "billable": true,  "start": "2026-10-15T11:15:00Z", "stop": "2026-10-15T12:00:00Z", "duration": 2700},
+    {"id": 103, "project_id": 2, "description": "CI cleanup",     "billable": false, "start": "2026-10-15T13:00:00Z", "stop": "2026-10-15T14:00:00Z", "duration": 3600},
+    {"id": 104, "project_id": null, "description": "emails",      "billable": false, "start": "2026-10-16T08:00:00Z", "stop": "2026-10-16T08:30:00Z", "duration": 1800},
+    {"id": 105, "project_id": 1, "description": "Bug triage",     "billable": true,  "start": "2026-10-16T17:00:00Z", "stop": null, "duration": -1}
+  ]
+}
