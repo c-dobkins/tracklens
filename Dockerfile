@@ -6,7 +6,7 @@ RUN --mount=type=cache,target=/root/.npm npm ci --no-audit --no-fund
 COPY web/ ./
 RUN npm run build # writes /src/internal/webui/dist
 
-FROM golang:1.27.2 AS build
+FROM golang:1.27.3 AS build
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN --mount=type=cache,target=/go/pkg/mod go mod download
