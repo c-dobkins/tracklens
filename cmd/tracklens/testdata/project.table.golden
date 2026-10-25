@@ -1,0 +1,11 @@
+PROJECT           HOURS  BILLABLE  BILLABLE %
+Client portal     3.25   3.25      100%
+Internal tooling  1.00   0.00      0%
+Side workspace    1.00   1.00      100%
+(no project)      0.50   0.00      0%
+TOTAL             5.75   4.25      74%
+
+Checks:
+ - entry 104 "emails" has no project
+ - entry 105 is still running (1h0m0s so far)
+ - entries 101 and 102 overlap by 15m0s

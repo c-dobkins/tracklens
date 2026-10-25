@@ -1,0 +1,8 @@
+/bin/
+/dist/
+/tracklens
+coverage.out
+vuln.json
+.env
+*.test
+/internal/webui/dist/

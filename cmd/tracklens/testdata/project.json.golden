@@ -1,0 +1,50 @@
+{
+  "rows": [
+    {
+      "project": "Client portal",
+      "hours": 3.25,
+      "billable_hours": 3.25
+    },
+    {
+      "project": "Internal tooling",
+      "hours": 1,
+      "billable_hours": 0
+    },
+    {
+      "project": "Side workspace",
+      "hours": 1,
+      "billable_hours": 1
+    },
+    {
+      "project": "(no project)",
+      "hours": 0.5,
+      "billable_hours": 0
+    }
+  ],
+  "total_hours": 5.75,
+  "billable_hours": 4.25,
+  "findings": [
+    {
+      "kind": "no_project",
+      "entry_ids": [
+        104
+      ],
+      "message": "entry 104 \"emails\" has no project"
+    },
+    {
+      "kind": "running",
+      "entry_ids": [
+        105
+      ],
+      "message": "entry 105 is still running (1h0m0s so far)"
+    },
+    {
+      "kind": "overlap",
+      "entry_ids": [
+        101,
+        102
+      ],
+      "message": "entries 101 and 102 overlap by 15m0s"
+    }
+  ]
+}

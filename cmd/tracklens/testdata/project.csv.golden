@@ -1,0 +1,5 @@
+project,hours,billable_hours
+Client portal,3.25,3.25
+Internal tooling,1.00,0.00
+Side workspace,1.00,1.00
+(no project),0.50,0.00

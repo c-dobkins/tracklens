@@ -1,0 +1,14 @@
+{
+  "days": [
+    {
+      "day": "2026-10-15",
+      "hours": 4.25,
+      "billable_hours": 3.25
+    },
+    {
+      "day": "2026-10-16",
+      "hours": 1.5,
+      "billable_hours": 1
+    }
+  ]
+}
