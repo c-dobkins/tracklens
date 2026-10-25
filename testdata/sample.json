@@ -1,0 +1,12 @@
+{
+  "now": "2026-10-16T18:00:00Z",
+  "entries": [
+    {"id": 90,  "workspace_id": 1, "project_id": 1,    "project_name": "Client portal",    "description": "Spec review",    "billable": true,  "start": "2026-10-06T09:00:00Z", "stop": "2026-10-06T11:00:00Z", "duration": 7200},
+    {"id": 91,  "workspace_id": 1, "project_id": 2,    "project_name": "Internal tooling", "description": "Runbooks",       "billable": false, "start": "2026-10-07T13:00:00Z", "stop": "2026-10-07T16:00:00Z", "duration": 10800},
+    {"id": 101, "workspace_id": 1, "project_id": 1,    "project_name": "Client portal",    "description": "API pagination", "billable": true,  "start": "2026-10-15T09:00:00Z", "stop": "2026-10-15T11:30:00Z", "duration": 9000},
+    {"id": 102, "workspace_id": 1, "project_id": 1,    "project_name": "Client portal",    "description": "Code review",    "billable": true,  "start": "2026-10-15T11:15:00Z", "stop": "2026-10-15T12:00:00Z", "duration": 2700},
+    {"id": 103, "workspace_id": 1, "project_id": 2,    "project_name": "Internal tooling", "description": "CI cleanup",     "billable": false, "start": "2026-10-15T13:00:00Z", "stop": "2026-10-15T14:00:00Z", "duration": 3600},
+    {"id": 104, "workspace_id": 1, "project_id": null,                                     "description": "emails",         "billable": false, "start": "2026-10-16T08:00:00Z", "stop": "2026-10-16T08:30:00Z", "duration": 1800},
+    {"id": 105, "workspace_id": 2, "project_id": 7,    "project_name": "Side workspace",   "description": "Bug triage",     "billable": true,  "start": "2026-10-16T17:00:00Z", "stop": null,                   "duration": -1}
+  ]
+}

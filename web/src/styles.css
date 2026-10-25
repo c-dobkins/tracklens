@@ -1,0 +1,442 @@
+/* Tokens follow the dataviz reference palette; dark values are their own
+   validated steps, not an inversion. Chart colours live in theme.ts. */
+:root {
+  color-scheme: light;
+  --page: #f9f9f7;
+  --surface: #fcfcfb;
+  --ink: #0b0b0b;
+  --ink-2: #52514e;
+  --muted: #898781;
+  --grid: #e1e0d9;
+  --border: rgba(11, 11, 11, 0.1);
+  --hover: rgba(11, 11, 11, 0.05);
+  --accent: #2a78d6;
+  --good: #0ca30c;
+  --warning: #fab219;
+  --serious: #ec835a;
+  --critical: #d03b3b;
+  --radius: 10px;
+  font-family: system-ui, -apple-system, 'Segoe UI', sans-serif;
+  font-size: 15px;
+  line-height: 1.45;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    color-scheme: dark;
+    --page: #0d0d0d;
+    --surface: #1a1a19;
+    --ink: #f0efec;
+    --ink-2: #c3c2b7;
+    --muted: #898781;
+    --grid: #2c2c2a;
+    --border: rgba(255, 255, 255, 0.1);
+    --hover: rgba(255, 255, 255, 0.06);
+    --accent: #3987e5;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--page);
+  color: var(--ink);
+}
+
+.app {
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 24px 16px 48px;
+}
+
+h1 {
+  margin: 0;
+  font-size: 22px;
+  font-weight: 650;
+}
+
+h2 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.subtitle {
+  margin: 2px 0 0;
+  color: var(--ink-2);
+  font-size: 13px;
+}
+
+.top {
+  margin-bottom: 16px;
+}
+
+/* Filters: one row above everything they scope. */
+.filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px 16px;
+  align-items: flex-end;
+  margin-bottom: 20px;
+}
+
+.segmented {
+  display: inline-flex;
+  max-width: 100%;
+  margin: 0;
+  padding: 2px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.segmented label {
+  position: relative;
+}
+
+.segmented input {
+  position: absolute;
+  opacity: 0;
+  inset: 0;
+  margin: 0;
+  cursor: pointer;
+}
+
+.segmented > label > span {
+  display: block;
+  padding: 6px 10px;
+  border-radius: 6px;
+  font-size: 13px;
+  color: var(--ink-2);
+  white-space: nowrap;
+}
+
+.segmented input:hover + span {
+  background: var(--hover);
+}
+
+.segmented input:checked + span {
+  background: var(--ink);
+  color: var(--surface);
+  font-weight: 600;
+}
+
+.segmented input:focus-visible + span,
+.data-bar:focus-visible,
+button:focus-visible,
+select:focus-visible,
+input:focus-visible,
+summary:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.field {
+  display: grid;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--ink-2);
+}
+
+.field input,
+.field select,
+.refresh,
+.error button {
+  font: inherit;
+  font-size: 14px;
+  color: var(--ink);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 6px 10px;
+  min-height: 34px;
+}
+
+.field select {
+  max-width: 220px;
+}
+
+.refresh,
+.error button {
+  cursor: pointer;
+}
+
+.refresh:disabled {
+  color: var(--muted);
+  cursor: progress;
+}
+
+.error {
+  margin-bottom: 16px;
+  padding: 12px 16px;
+  border: 1px solid var(--critical);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+
+/* Refetch keeps the frame: hold the previous render, dimmed. */
+.content {
+  display: grid;
+  gap: 16px;
+  transition: opacity 150ms;
+}
+
+.content.stale {
+  opacity: 0.55;
+}
+
+.grid {
+  display: grid;
+  gap: 16px;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 440px), 1fr));
+}
+
+.tiles {
+  display: grid;
+  gap: 16px;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 180px), 1fr));
+}
+
+.tile,
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 16px;
+  min-width: 0;
+}
+
+.tile {
+  display: grid;
+  gap: 4px;
+  align-content: start;
+}
+
+.tile-label {
+  font-size: 13px;
+  color: var(--ink-2);
+}
+
+.tile-value {
+  font-size: 26px;
+  font-weight: 600;
+}
+
+.hero .tile-value {
+  font-size: 48px;
+  line-height: 1.05;
+}
+
+.tile-delta {
+  font-size: 13px;
+  color: var(--ink-2);
+}
+
+.tile-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 20px;
+}
+
+.card-header {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 8px 16px;
+  margin-bottom: 8px;
+}
+
+.legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 14px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: 13px;
+  color: var(--ink-2);
+}
+
+.legend li {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.swatch {
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+}
+
+.chart {
+  width: 100%;
+}
+
+/* Hovered or focused bars lift slightly. */
+.data-bar {
+  cursor: default;
+}
+
+.data-bar:hover path,
+.data-bar:focus-visible path {
+  filter: brightness(1.12);
+}
+
+.tooltip {
+  display: grid;
+  gap: 2px;
+  padding: 8px 10px;
+  background: var(--surface);
+  color: var(--ink);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.12);
+  font-size: 13px;
+  white-space: nowrap;
+}
+
+.tooltip-value {
+  font-size: 15px;
+}
+
+.tooltip-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--ink-2);
+}
+
+.line-key {
+  display: inline-block;
+  width: 12px;
+  height: 2px;
+  border-radius: 1px;
+}
+
+.table-view {
+  margin-top: 8px;
+  font-size: 13px;
+}
+
+.table-view summary {
+  cursor: pointer;
+  color: var(--ink-2);
+  width: fit-content;
+}
+
+.table-view table {
+  width: 100%;
+  margin-top: 8px;
+  border-collapse: collapse;
+}
+
+th,
+td {
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--grid);
+  text-align: left;
+}
+
+th {
+  font-weight: 600;
+  color: var(--ink-2);
+}
+
+.num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.empty {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--ink-2);
+  margin: 8px 0;
+}
+
+.findings {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.findings li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 12px;
+}
+
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 8px 2px 4px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.status-icon path {
+  fill: none;
+  stroke: #fff;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.status-good circle {
+  fill: var(--good);
+}
+
+.status-warning circle {
+  fill: var(--warning);
+}
+
+.status-warning path {
+  stroke: #0b0b0b; /* white fails contrast on the yellow */
+}
+
+.status-serious circle {
+  fill: var(--serious);
+}
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+@media (max-width: 600px) {
+  .tiles {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .tiles .hero,
+  .tiles .tile:last-child {
+    grid-column: 1 / -1;
+  }
+
+  .tile-value {
+    font-size: 22px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .content {
+    transition: none;
+  }
+}

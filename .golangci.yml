@@ -1,0 +1,69 @@
+version: "2"
+
+linters:
+  enable:
+    # bugs
+    - bodyclose
+    - errorlint
+    - exhaustive
+    - gosec
+    - musttag
+    - noctx
+    - rowserrcheck
+    - sqlclosecheck
+    - unparam
+    # style and modern idioms
+    - copyloopvar
+    - errname
+    - gocritic
+    - intrange
+    - misspell
+    - modernize
+    - nolintlint
+    - perfsprint
+    - revive
+    - sloglint
+    - thelper
+    - unconvert
+    - usestdlibvars
+    - wastedassign
+  settings:
+    errcheck:
+      exclude-functions:
+        - (*database/sql.Rows).Close
+        - (io.Closer).Close
+    exhaustive:
+      default-signifies-exhaustive: true
+    gocritic:
+      enabled-tags: [diagnostic, style, performance]
+      disabled-checks:
+        - hugeParam        # small value types are clearer by value
+        - unnamedResult
+    revive:
+      rules:
+        - name: exported
+        - name: package-comments
+        - name: var-naming
+        - name: indent-error-flow
+        - name: errorf
+        - name: error-strings
+        - name: receiver-naming
+        - name: unused-parameter
+        - name: context-as-argument
+    sloglint:
+      kv-only: true
+  exclusions:
+    presets:
+      - std-error-handling
+    rules:
+      - path: _test\.go
+        linters: [gosec, errcheck]
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  settings:
+    goimports:
+      local-prefixes:
+        - github.com/c-dobkins/tracklens
