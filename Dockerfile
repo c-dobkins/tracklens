@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1
-FROM node:26.12.0-bookworm-slim AS web
+FROM node:26.12.1-bookworm-slim AS web
 WORKDIR /src/web
 COPY web/package.json web/package-lock.json ./
 RUN --mount=type=cache,target=/root/.npm npm ci --no-audit --no-fund
